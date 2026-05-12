@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lab-scopes"
+version = "0.1.0"
+description = "Reusable oscilloscope drivers and offline readers for lab data."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "LAPD/BaPSF contributors"},
+]
+dependencies = [
+  "numpy",
+]
+
+[project.optional-dependencies]
+hdf5 = ["h5py"]
+plot = ["matplotlib"]
+dev = ["pytest", "h5py"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
