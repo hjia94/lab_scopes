@@ -1,22 +1,25 @@
 # lab_scopes
 
-Reusable oscilloscope drivers and offline readers for LAPD/BaPSF-style scope data.
+Reusable oscilloscope drivers and offline readers for BaPSF style scope data.
 
-The package is intentionally usable without PyVISA. LeCroy live communication is
-planned around native VICP-over-TCP, Rigol DHO800/DHO900 communication uses plain
-TCP/SCPI, and LeCroy `.trc` readers work offline.
+LeCroy communication uses native VICP/TCP;
+Rigol DHO800/DHO900 communication uses plain TCP/SCPI.
+
+LeCroy `.trc` readers work offline.
 
 ## Install
 
-```powershell
-pip install -e .
+```terminal
+pip install "git+https://github.com/hjia94/lab_scopes.git"
 ```
 
 Optional HDF5 helpers:
 
-```powershell
-pip install -e ".[hdf5]"
+```terminal
+pip install "lab-scopes[hdf5] @ git+https://github.com/hjia94/lab_scopes.git"
 ```
+
+For development: pip install -e .
 
 ## Imports
 
@@ -37,8 +40,3 @@ from read_scope_data import read_trc_data_simplified
 from rigol_scope import RigolScope
 from rigol_dho800 import RigolDHO800
 ```
-
-## Tests
-
-The test suite does not connect to real oscilloscopes. LeCroy `.trc` tests use
-`D:\data\raw data` by default, or `LAB_SCOPES_TRC_DIR` if set.

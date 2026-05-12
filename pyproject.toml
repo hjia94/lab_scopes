@@ -21,8 +21,15 @@ hdf5 = ["h5py"]
 plot = ["matplotlib"]
 dev = ["pytest", "h5py"]
 
-[tool.setuptools.package-dir]
-"" = "src"
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+  "LeCroy_Scope",
+  "LeCroy_Scope_Header",
+  "read_scope_data",
+  "rigol_dho800",
+  "rigol_scope",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
