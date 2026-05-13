@@ -324,25 +324,28 @@ class LeCroyScope:
         hdr = self.translate_header_bytes(header_bytes)
         self.hdr = hdr
         NSamples, ndx0 = self.parse_header(hdr)
-        if hdr.comm_type == 1:
-            ndx1 = ndx0 + NSamples * 2
-            wdata = struct.unpack(str(NSamples) + "h", trace_bytes[ndx0:ndx1])
-            data = wdata if raw else np.array(wdata) * hdr.vertical_gain - hdr.vertical_offset
-        else:
-            ndx1 = ndx0 + NSamples
-            cdata = struct.unpack(str(NSamples) + "b", trace_bytes[ndx0:ndx1])
-            data = cdata if raw else np.array(cdata) * hdr.vertical_gain - hdr.vertical_offset
+        data = self._parse_wave_array(trace_bytes, hdr, NSamples, ndx0, raw=raw)
         return data, header_bytes
 
+    def _parse_wave_array(self, trace_bytes, hdr, NSamples, ndx0, raw=False):
+        if hdr.comm_type == 1:
+            data = np.frombuffer(trace_bytes, dtype="<i2", count=NSamples, offset=ndx0)
+        else:
+            data = np.frombuffer(trace_bytes, dtype=np.int8, count=NSamples, offset=ndx0)
+        if raw:
+            return data
+        return data.astype(np.float64, copy=False) * hdr.vertical_gain - hdr.vertical_offset
+
     def acquire_sequence_data(self, trace):
-        _trace_bytes, header_bytes = self.acquire_bytes(trace)
+        trace_bytes, header_bytes = self.acquire_bytes(trace, seg=0)
         hdr = self.translate_header_bytes(header_bytes)
         if hdr.subarray_count < 2:
             raise RuntimeError("Sequence mode requires at least 2 segments.")
-        segment_data = []
-        for segment in range(1, hdr.subarray_count + 1):
-            data, _ = self.acquire(trace, segment)
-            segment_data.append(data)
+        self.hdr = hdr
+        NSamples, ndx0 = self.parse_header(hdr)
+        total_samples = NSamples * hdr.subarray_count
+        data = self._parse_wave_array(trace_bytes, hdr, total_samples, ndx0, raw=False)
+        segment_data = list(data.reshape(hdr.subarray_count, NSamples))
         return segment_data, header_bytes
 
     def time_array(self, trace=None):
