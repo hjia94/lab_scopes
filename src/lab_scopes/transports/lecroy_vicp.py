@@ -90,14 +90,23 @@ class LeCroyVICPTransport:
         return self.read()
 
     def read_raw(self) -> bytes:
-        payload = bytearray()
+        payloads: list[bytearray] = []
+        total_size = 0
         while True:
             header = self._recv_exact(HEADER_SIZE)
             decoded = decode_vicp_header(header)
-            chunk = self._recv_exact(int(decoded["payload_len"]))
-            payload.extend(chunk)
+            chunk = self._recv_exact_into(int(decoded["payload_len"]))
+            payloads.append(chunk)
+            total_size += len(chunk)
             if decoded["eoi"]:
                 break
+        if len(payloads) == 1:
+            return bytes(payloads[0])
+        payload = bytearray(total_size)
+        offset = 0
+        for chunk in payloads:
+            payload[offset:offset + len(chunk)] = chunk
+            offset += len(chunk)
         return bytes(payload)
 
     def _send(self, payload: bytes) -> None:
@@ -110,17 +119,22 @@ class LeCroyVICPTransport:
             raise ScopeTimeoutError(f"timed out writing to {self.host}:{self.port}") from exc
 
     def _recv_exact(self, size: int) -> bytes:
+        return bytes(self._recv_exact_into(size))
+
+    def _recv_exact_into(self, size: int) -> bytearray:
         sock = self._require_socket()
-        data = bytearray()
+        data = bytearray(size)
+        view = memoryview(data)
+        offset = 0
         try:
-            while len(data) < size:
-                chunk = sock.recv(size - len(data))
-                if not chunk:
+            while offset < size:
+                received = sock.recv_into(view[offset:], size - offset)
+                if not received:
                     raise ScopeConnectionError("connection closed while reading VICP data")
-                data.extend(chunk)
+                offset += received
         except socket.timeout as exc:
             raise ScopeTimeoutError(f"timed out reading from {self.host}:{self.port}") from exc
-        return bytes(data)
+        return data
 
     def _require_socket(self) -> socket.socket:
         if self._sock is None:
