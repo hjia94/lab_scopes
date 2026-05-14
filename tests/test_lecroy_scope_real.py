@@ -22,7 +22,7 @@ from lab_scopes.lecroy import LeCroyHeader, LeCroyScope
 
 
 # === user configuration =====================================================
-SCOPE_IP = None
+SCOPE_IP = "192.168.7.63"
 DESTRUCTIVE = False
 # ============================================================================
 

@@ -1,0 +1,290 @@
+================================================================================= test session starts ==================================================================================
+platform win32 -- Python 3.12.4, pytest-9.0.3, pluggy-1.6.0 -- C:\ProgramData\anaconda3\python.exe
+cachedir: .pytest_cache
+rootdir: C:\python_scripts\lab_scopes
+configfile: pyproject.toml
+plugins: anyio-4.2.0
+collected 24 items                                                                                                                                                                      
+
+tests/test_lecroy_scope_real.py::test_connect_and_idn PASSED
+tests/test_lecroy_scope_real.py::test_validate_channel_accepts_ints_and_strings PASSED
+tests/test_lecroy_scope_real.py::test_validate_trace_rejects_unknown PASSED
+tests/test_lecroy_scope_real.py::test_valid_trace_names_populated PASSED
+tests/test_lecroy_scope_real.py::test_displayed_channels_subset_of_valid PASSED
+tests/test_lecroy_scope_real.py::test_max_samples_query_is_positive_int FAILED
+tests/test_lecroy_scope_real.py::test_vertical_scale_read FAILED
+tests/test_lecroy_scope_real.py::test_set_vertical_scale_roundtrip SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_averaging_count_read SKIPPED (no displayed channels on scope)
+tests/test_lecroy_scope_real.py::test_set_averaging_count_roundtrip SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_max_averaging_count_matches_displayed SKIPPED (no displayed channels)
+tests/test_lecroy_scope_real.py::test_acquire_bytes_header_size FAILED
+tests/test_lecroy_scope_real.py::test_acquire_raw_int16 FAILED
+tests/test_lecroy_scope_real.py::test_acquire_scaled_is_float64 FAILED
+tests/test_lecroy_scope_real.py::test_scaled_matches_manual_conversion FAILED
+tests/test_lecroy_scope_real.py::test_header_parses_with_known_fields FAILED
+tests/test_lecroy_scope_real.py::test_time_array_length_matches_samples FAILED
+tests/test_lecroy_scope_real.py::test_time_array_uses_horiz_interval FAILED
+tests/test_lecroy_scope_real.py::test_acquire_sequence_when_subarray_count_gt_1 FAILED
+tests/test_lecroy_scope_real.py::test_write_status_msg_no_error PASSED
+tests/test_lecroy_scope_real.py::test_expanded_name_lookup PASSED
+tests/test_lecroy_scope_real.py::test_set_trigger_mode_cycle SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_calibrate_runs SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_zz_collect_trace_report PASSEDLeCroy_Scope:__exit__() called  at Thu May 14 13:25:20 2026
+
+==============================================================================
+LeCroy real-scope test report
+==============================================================================
+  SCOPE_IP:    192.168.7.63
+  DESTRUCTIVE: False
+
+Test results
+------------------------------------------------------------------------------
+  [PASS] test_connect_and_idn: IDN='LECROY,WP404HD,LCRY4609N02882,10.8.0'
+  [PASS] test_validate_channel_accepts_ints_and_strings: C1, 3->C3, rejects C9/0
+  [PASS] test_validate_trace_rejects_unknown: valid_trace_names=('C2', 'C4', 'F2', 'F4', 'F6', 'F8', 'M2', 'M4', 'TB', 'TD')
+  [PASS] test_valid_trace_names_populated: 10 valid trace names
+  [PASS] test_displayed_channels_subset_of_valid: channels=(), traces=()
+  [PASS] test_write_status_msg_no_error: short + long both accepted
+  [PASS] test_expanded_name_lookup: C1 -> 'Channel1'
+  [PASS] test_zz_collect_trace_report: profiled 0/4 traces
+
+Warnings
+------------------------------------------------------------------------------
+  ! only 0 displayed trace(s); multi-trace coverage limited
+  ! F6: report collection raised error: unpack requires a buffer of 346 bytes
+  ! F8: parse_header failed (**** fail because NSamples = 0 (possible cause: trace has no data? scope not triggered?)); skipping in report
+  ! TB: parse_header failed (**** fail because NSamples = 0 (possible cause: trace has no data? scope not triggered?)); skipping in report
+  ! TD: parse_header failed (**** fail because NSamples = 0 (possible cause: trace has no data? scope not triggered?)); skipping in report
+
+==============================================================================
+
+
+======================================================================================= FAILURES =======================================================================================
+________________________________________________________________________ test_max_samples_query_is_positive_int ________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>
+
+    @_real
+    def test_max_samples_query_is_positive_int(scope):
+>       n = scope.max_samples()
+            ^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:166: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, N = 0
+
+    def max_samples(self, N=0) -> int:
+        if N > 0:
+            self.scope.write('VBS "app.Acquisition.Horizontal.MaxSamples=' + str(N) + '"')
+>       return int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       ValueError: invalid literal for int() with base 10: 'OFF'
+
+src\lab_scopes\lecroy\scope.py:170: ValueError
+_______________________________________________________________________________ test_vertical_scale_read _______________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_vertical_scale_read(scope, any_displayed_trace):
+>       v = scope.vertical_scale(any_displayed_trace)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:176: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, trace = 'F8'
+
+    def vertical_scale(self, trace) -> float:
+        Tn = self.validate_trace(trace)
+>       return float(self.scope.query('VBS? "Return=app.Acquisition.' + Tn + '.VerScale"'))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       ValueError: could not convert string to float: 'OFF'
+
+src\lab_scopes\lecroy\scope.py:190: ValueError
+____________________________________________________________________________ test_acquire_bytes_header_size ____________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_acquire_bytes_header_size(scope, any_displayed_trace):
+        from lab_scopes.lecroy import WAVEDESC_SIZE
+    
+        trace_bytes, header_bytes = scope.acquire_bytes(any_displayed_trace)
+>       assert len(header_bytes) == WAVEDESC_SIZE
+E       AssertionError: assert 0 == 346
+E        +  where 0 = len(b'')
+
+tests\test_lecroy_scope_real.py:241: AssertionError
+________________________________________________________________________________ test_acquire_raw_int16 ________________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_acquire_raw_int16(scope, any_displayed_trace):
+>       data, header_bytes = scope.acquire(any_displayed_trace, raw=True)
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:251: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src\lab_scopes\lecroy\scope.py:324: in acquire
+    hdr = self.translate_header_bytes(header_bytes)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+____________________________________________________________________________ test_acquire_scaled_is_float64 ____________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_acquire_scaled_is_float64(scope, any_displayed_trace):
+>       data, _ = scope.acquire(any_displayed_trace, raw=False)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:263: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src\lab_scopes\lecroy\scope.py:324: in acquire
+    hdr = self.translate_header_bytes(header_bytes)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+________________________________________________________________________ test_scaled_matches_manual_conversion _________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_scaled_matches_manual_conversion(scope, any_displayed_trace):
+        """Single-fetch cross-check: re-scale raw via the documented formula and
+        confirm it matches what `_parse_wave_array(raw=False)` produces on the
+        same trace bytes. Avoids the double-acquire flake."""
+        trace_bytes, header_bytes = scope.acquire_bytes(any_displayed_trace)
+>       hdr = scope.translate_header_bytes(header_bytes)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:280: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+_________________________________________________________________________ test_header_parses_with_known_fields _________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_header_parses_with_known_fields(scope, any_displayed_trace):
+        _, header_bytes = scope.acquire_bytes(any_displayed_trace)
+>       hdr = scope.translate_header_bytes(header_bytes)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:300: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+________________________________________________________________________ test_time_array_length_matches_samples ________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_time_array_length_matches_samples(scope, any_displayed_trace):
+>       data, _ = scope.acquire(any_displayed_trace, raw=True)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:318: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src\lab_scopes\lecroy\scope.py:324: in acquire
+    hdr = self.translate_header_bytes(header_bytes)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+_________________________________________________________________________ test_time_array_uses_horiz_interval __________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_time_array_uses_horiz_interval(scope, any_displayed_trace):
+        _, header_bytes = scope.acquire_bytes(any_displayed_trace)
+>       hdr = scope.translate_header_bytes(header_bytes)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:331: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+____________________________________________________________________ test_acquire_sequence_when_subarray_count_gt_1 ____________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, any_displayed_trace = 'F8'
+
+    @_real
+    def test_acquire_sequence_when_subarray_count_gt_1(scope, any_displayed_trace):
+        _, header_bytes = scope.acquire_bytes(any_displayed_trace)
+>       hdr = scope.translate_header_bytes(header_bytes)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:348: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000002BBEE999F40>, header_bytes = b''
+
+    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
+>       return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       struct.error: unpack requires a buffer of 346 bytes
+
+src\lab_scopes\lecroy\scope.py:288: error
+=============================================================================== short test summary info ================================================================================
+FAILED tests/test_lecroy_scope_real.py::test_max_samples_query_is_positive_int - ValueError: invalid literal for int() with base 10: 'OFF'
+FAILED tests/test_lecroy_scope_real.py::test_vertical_scale_read - ValueError: could not convert string to float: 'OFF'
+FAILED tests/test_lecroy_scope_real.py::test_acquire_bytes_header_size - AssertionError: assert 0 == 346
+FAILED tests/test_lecroy_scope_real.py::test_acquire_raw_int16 - struct.error: unpack requires a buffer of 346 bytes
+FAILED tests/test_lecroy_scope_real.py::test_acquire_scaled_is_float64 - struct.error: unpack requires a buffer of 346 bytes
+FAILED tests/test_lecroy_scope_real.py::test_scaled_matches_manual_conversion - struct.error: unpack requires a buffer of 346 bytes
+FAILED tests/test_lecroy_scope_real.py::test_header_parses_with_known_fields - struct.error: unpack requires a buffer of 346 bytes
+FAILED tests/test_lecroy_scope_real.py::test_time_array_length_matches_samples - struct.error: unpack requires a buffer of 346 bytes
+FAILED tests/test_lecroy_scope_real.py::test_time_array_uses_horiz_interval - struct.error: unpack requires a buffer of 346 bytes
+FAILED tests/test_lecroy_scope_real.py::test_acquire_sequence_when_subarray_count_gt_1 - struct.error: unpack requires a buffer of 346 bytes
+======================================================================= 10 failed, 8 passed, 6 skipped in 0.79s ========================================================================
