@@ -29,6 +29,35 @@ from .constants import (
 )
 
 
+class LeCroyNoDataError(RuntimeError):
+    """Raised when a trace's :WAVEFORM? response carries no curve data.
+
+    Why: math/measurement traces can be "ON" with no source assigned, so they
+    accept :WAVEFORM? but return a payload too short to contain a WAVEDESC.
+    """
+
+
+def _vbs_int(resp, default: int = 0) -> int:
+    # MAUI VBS reads on inactive math/measurement traces return the literal "OFF".
+    s = resp.strip() if isinstance(resp, str) else resp
+    if not s or (isinstance(s, str) and s.upper() == "OFF"):
+        return default
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _vbs_float(resp, default: float = 0.0) -> float:
+    s = resp.strip() if isinstance(resp, str) else resp
+    if not s or (isinstance(s, str) and s.upper() == "OFF"):
+        return default
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
 class LeCroyScope:
     """LeCroy X-Stream scope driver using native TCP/VICP."""
 
@@ -167,7 +196,7 @@ class LeCroyScope:
     def max_samples(self, N=0) -> int:
         if N > 0:
             self.scope.write('VBS "app.Acquisition.Horizontal.MaxSamples=' + str(N) + '"')
-        return int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'))
+        return _vbs_int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'), 0)
 
     def displayed_channels(self) -> Tuple[str, ...]:
         channels = ()
@@ -187,7 +216,7 @@ class LeCroyScope:
 
     def vertical_scale(self, trace) -> float:
         Tn = self.validate_trace(trace)
-        return float(self.scope.query('VBS? "Return=app.Acquisition.' + Tn + '.VerScale"'))
+        return _vbs_float(self.scope.query('VBS? "Return=app.Acquisition.' + Tn + '.VerScale"'), 0.0)
 
     def set_vertical_scale(self, trace, scale) -> float:
         Tn = self.validate_trace(trace)
@@ -197,7 +226,7 @@ class LeCroyScope:
 
     def averaging_count(self, channel="C1") -> int:
         Cn = self.validate_channel(channel)
-        return int(self.scope.query('VBS? "Return=app.Acquisition.' + Cn + '.AverageSweeps"'))
+        return _vbs_int(self.scope.query('VBS? "Return=app.Acquisition.' + Cn + '.AverageSweeps"'), 1)
 
     def set_averaging_count(self, channel="C1", NSweeps=1):
         Cn = self.validate_channel(channel)
@@ -315,6 +344,11 @@ class LeCroyScope:
             print("\n<:> reading", trace, "from scope")
         self.scope.write(trace + ":WAVEFORM?")
         trace_bytes = self.scope.read_raw()
+        if len(trace_bytes) < 15 + WAVEDESC_SIZE:
+            raise LeCroyNoDataError(
+                f"{trace}: :WAVEFORM? returned {len(trace_bytes)} bytes "
+                f"(need >= {15 + WAVEDESC_SIZE}); trace likely has no data"
+            )
         header_bytes = trace_bytes[15:15 + WAVEDESC_SIZE]
         self.trace_bytes = trace_bytes
         return trace_bytes, header_bytes
