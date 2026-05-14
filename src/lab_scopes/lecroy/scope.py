@@ -86,9 +86,8 @@ class LeCroyScope:
         if len(self.valid_trace_names) == 0:
             for tr in KNOWN_TRACE_NAMES:
                 try:
-                    self.scope.write(tr + ":TRACE?")
-                    self.scope.write("CMR?")
-                    error_code = int(self.scope.read())
+                    self.scope.query(tr + ":TRACE?")
+                    error_code = int(self.scope.query("CMR?"))
                 except Exception:
                     continue
                 if error_code == 0:
@@ -438,8 +437,12 @@ class LeCroyScope:
 
     def calibrate(self, a=True):
         if a:
-            self.scope.write("*CAL?")
-            time.sleep(15)
+            prev_timeout = self.scope.timeout
+            self.scope.timeout = max(prev_timeout, 60.0)
+            try:
+                self.scope.query("*CAL?")
+            finally:
+                self.scope.timeout = prev_timeout
         else:
             self.scope.write("AUTO_CALIBRATE OFF")
 
