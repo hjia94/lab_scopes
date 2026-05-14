@@ -1,6 +1,6 @@
 """LeCroy waveform descriptor constants."""
 
-from .header import (
+from .wavedesc import (
     EXPANDED_TRACE_NAMES,
     KNOWN_TRACE_NAMES,
     PROCESSING_TYPES,

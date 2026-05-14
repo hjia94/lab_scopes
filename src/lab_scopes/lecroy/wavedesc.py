@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-Lecroy Scope Header access class
-PP, derived from LeCroy_Scope.py
+LeCroy WAVEDESC (waveform descriptor) parser.
 
-todo: refactor LeCroy_Scope to use this module
+The WAVEDESC is the 346-byte binary descriptor returned by LeCroy X-Stream
+scopes inside every `:WAVEFORM?` response. It describes vertical/horizontal
+scaling, trigger time, timebase, etc.
 
-Feb.2024 update:
--- Use f-strings for string formatting instead of concatenation for better readability.
--- change numpy use to np
+Not to be confused with:
+- the 8-byte VICP frame header (transport layer, see transports/lecroy_vicp.py)
+- the IEEE 488.2 TMC `#N...` block-length prefix (a few bytes, see
+  transports/rigol_functions.py)
 """
 import numpy as np
 import collections
 import struct
 import sys
 
-# the header recorded for each trace
+# the WAVEDESC recorded for each trace
 # 63 entries, 346 bytes
 WAVEDESC = collections.namedtuple('WAVEDESC',
 ['descriptor_name', 'template_name', 'comm_type', 'comm_order',
@@ -33,7 +35,7 @@ WAVEDESC = collections.namedtuple('WAVEDESC',
 
 WAVEDESC_SIZE = 346
 """
- The header should be 346 bytes (with correct packing); it is preceded by 15 bytes for the def9header etc.
+ The WAVEDESC should be 346 bytes (with correct packing); it is preceded by 15 bytes for the def9header etc.
  note: for simplicity I expanded the leCroy_time struct into explicit fields above, labeled tt_xxx
 
  To get floating values from the stored raw data: y[i] = vertical_gain * data[i] - vertical_offset
@@ -81,98 +83,98 @@ KNOWN_TRACE_NAMES = sorted(list(EXPANDED_TRACE_NAMES.keys()))
 
 #================================================================================================
 
-class LeCroyHeader:
-	""" LeCroy X-Stream scope header interpretation """
-	def __init__(self, hdr_bytes=b'\0'*WAVEDESC_SIZE):
-		self.hdr = WAVEDESC._make(struct.unpack(WAVEDESC_FMT, hdr_bytes))
+class LeCroyWavedesc:
+	""" LeCroy X-Stream scope WAVEDESC interpretation """
+	def __init__(self, wavedesc_bytes=b'\0'*WAVEDESC_SIZE):
+		self.wd = WAVEDESC._make(struct.unpack(WAVEDESC_FMT, wavedesc_bytes))
 
 	def __str__(self):
 		""" return a string representation: TODO """
-		return str(self.hdr)
+		return str(self.wd)
 
 	def __repr__(self):
 		""" return a printable version: TODO """
 		return str(self)
 
 	@property
-	def descriptor_name(self): return self.hdr.descriptor_name
+	def descriptor_name(self): return self.wd.descriptor_name
 
 	@property
-	def sweeps_per_acq(self): return self.hdr.sweeps_per_acq
+	def sweeps_per_acq(self): return self.wd.sweeps_per_acq
 
 	@property
 	def num_samples(self):
-		if self.hdr.comm_type == 0:
+		if self.wd.comm_type == 0:
 			# data returned as signed chars
-			return self.hdr.wave_array_1
-		elif self.hdr.comm_type == 1:
+			return self.wd.wave_array_1
+		elif self.wd.comm_type == 1:
 			# data returned as shorts
-			return int(self.hdr.wave_array_1/2)
+			return int(self.wd.wave_array_1/2)
 		else:
 			# throw an exception if we don't recognize comm_type
-			err = '**** hdr.comm_type = ' + str(self.hdr.comm_type) + '; expected value is either 0 or 1'
+			err = '**** wd.comm_type = ' + str(self.wd.comm_type) + '; expected value is either 0 or 1'
 			raise(RuntimeError(err)).with_traceback(sys.exc_info()[2])
 
 	@property
-	def record_type(self):       return RECORD_TYPES[self.hdr.record_type]
+	def record_type(self):       return RECORD_TYPES[self.wd.record_type]
 
 	@property
-	def timebase(self):          return f"{TIMEBASE_IDS[self.hdr.timebase]} per div"
+	def timebase(self):          return f"{TIMEBASE_IDS[self.wd.timebase]} per div"
 
 	@property
-	def vertical_gain(self):     return f"{VERT_GAIN_IDS[self.hdr.fixed_vert_gain]} per div"
+	def vertical_gain(self):     return f"{VERT_GAIN_IDS[self.wd.fixed_vert_gain]} per div"
 
 	@property
-	def vertical_coupling(self): return VERT_COUPLINGS[self.hdr.vert_coupling]
+	def vertical_coupling(self): return VERT_COUPLINGS[self.wd.vert_coupling]
 
 	@property
-	def processing_type(self):   return PROCESSING_TYPES[self.hdr.processing_done]
+	def processing_type(self):   return PROCESSING_TYPES[self.wd.processing_done]
 
 	@property
-	def num_sweeps(self):        return self.hdr.sweeps_per_acq
+	def num_sweeps(self):        return self.wd.sweeps_per_acq
 
 	@property
-	def nominal_bits(self):      return self.hdr.nominal_bits
+	def nominal_bits(self):      return self.wd.nominal_bits
 
 	@property
-	def vertical_units(self):    return str(self.hdr.vertunit).split('\\x00')[0][2:]    # for whatever reason this prepends "b'" to string
+	def vertical_units(self):    return str(self.wd.vertunit).split('\\x00')[0][2:]    # for whatever reason this prepends "b'" to string
 
 	@property
-	def horizontal_units(self):  return str(self.hdr.horunit).split('\\x00')[0][2:]     # so ignore first 2 chars  TODO: fix this
+	def horizontal_units(self):  return str(self.wd.horunit).split('\\x00')[0][2:]     # so ignore first 2 chars  TODO: fix this
 
 	@property
-	def dt(self):                return self.hdr.horiz_interval
+	def dt(self):                return self.wd.horiz_interval
 
 	@property
-	def t0(self):                return self.hdr.horiz_offset
+	def t0(self):                return self.wd.horiz_offset
 
 	@property
-	def vertical_offset(self):  return self.hdr.vertical_offset
+	def vertical_offset(self):  return self.wd.vertical_offset
 
 	@property
-	def data_scaling(self):      return f"gain = {self.hdr.vertical_gain}, offset = {self.hdr.vertical_offset} {self.vertical_units}"
+	def data_scaling(self):      return f"gain = {self.wd.vertical_gain}, offset = {self.wd.vertical_offset} {self.vertical_units}"
 
 	@property
-	def sample_timing(self):     return f"dt = {self.hdr.horiz_interval}, offset = {self.hdr.horiz_offset} {self.horizontal_units}"
+	def sample_timing(self):     return f"dt = {self.wd.horiz_interval}, offset = {self.wd.horiz_offset} {self.horizontal_units}"
 
 	@property
 	def time_array(self) -> np.array:
 		""" return a numpy array containing num_samples times
 		"""
 		NSamples = self.num_samples
-		t0 = self.hdr.horiz_offset
-		return np.linspace(t0, t0 + NSamples*self.hdr.horiz_interval, NSamples, endpoint=False)
+		t0 = self.wd.horiz_offset
+		return np.linspace(t0, t0 + NSamples*self.wd.horiz_interval, NSamples, endpoint=False)
 		#note on linspace construction here: suppose we have 2 samples and the trace is 10ms, the samples should be at 0 and 5 ms,
 		#                                    rather than 0 and 10ms as linspace(0,N*dt,N) would return
 
 	def dump(self):
 		s = ""
-		for n,v in zip(WAVEDESC._fields, list(self.hdr)):
+		for n,v in zip(WAVEDESC._fields, list(self.wd)):
 			s += str(type(v)).ljust(20) + str(n.ljust(20)) + str(v) + '\n'
 		return s
 
 	def generate_test_data(self, NTimes=1000, verbose=False):
-		self.hdr = self.hdr._replace(descriptor_name = b"WAVEDESC\0\0\0\0\0\0\0\0",
+		self.wd = self.wd._replace(descriptor_name = b"WAVEDESC\0\0\0\0\0\0\0\0",
 		                             comm_type       = 1,    # data returned as shorts
 		                             wave_array_1    = 2*NTimes,
 		                             record_type     = 3,
@@ -189,38 +191,36 @@ class LeCroyHeader:
 		                             vertical_gain   = 0.1,
 		                             vertical_offset = 0.2)
 		if verbose:
-			print("new header:")
+			print("new WAVEDESC:")
 			print(self.dump())
 
-		hdr_bytes = struct.pack(WAVEDESC_FMT, *list(self.hdr))
-		return hdr_bytes
+		wavedesc_bytes = struct.pack(WAVEDESC_FMT, *list(self.wd))
+		return wavedesc_bytes
 
 
 
 if __name__ == '__main__':
 	""" """
 
-	"generate a byte array containing the header - either construction is ok:"
+	"generate a byte array containing the WAVEDESC - either construction is ok:"
 	if False:
-		hdr_bytes = numpy.zeros((WAVEDESC_SIZE,), dtype='B')
-		lsh = LeCroyHeader(hdr_bytes)
+		wavedesc_bytes = np.zeros((WAVEDESC_SIZE,), dtype='B')
+		lsw = LeCroyWavedesc(wavedesc_bytes)
 	else:
-		lsh = LeCroyHeader()
+		lsw = LeCroyWavedesc()
 
-	nhdr_bytes = lsh.generate_test_data()
+	new_wavedesc_bytes = lsw.generate_test_data()
 
-	print("dt                 ", lsh.dt)
-	print("num_samples        ", lsh.num_samples)
-	print("sample timing      ", lsh.sample_timing)
-	print("nominal_bits       ", lsh.nominal_bits)
-	print("time array =", lsh.time_array)
-
-	#lsh2 = LeCroy_Scope_Header(nhdr_bytes)
-	#print(lsh2.dump())
+	print("dt                 ", lsw.dt)
+	print("num_samples        ", lsw.num_samples)
+	print("sample timing      ", lsw.sample_timing)
+	print("nominal_bits       ", lsw.nominal_bits)
+	print("time array =", lsw.time_array)
 
 	print("\n---- done ----")
 
 
-# Backwards-compatible legacy name.
-LeCroy_Scope_Header = LeCroyHeader
-
+# Deprecated aliases retained for one release for external (LAPD_DAQ) callers.
+# Prefer LeCroyWavedesc in new code.
+LeCroyHeader = LeCroyWavedesc
+LeCroy_Scope_Header = LeCroyWavedesc

@@ -8,7 +8,7 @@ def test_legacy_import_modules_resolve():
     assert WAVEDESC_SIZE == 346
     assert EXPANDED_TRACE_NAMES["C1"] == "Channel1"
     assert LeCroy_Scope.__name__ == "LeCroyScope"
-    assert LeCroy_Scope_Header.__name__ == "LeCroyHeader"
+    assert LeCroy_Scope_Header.__name__ == "LeCroyWavedesc"
     assert callable(read_trc_data_simplified)
     assert RigolDHO800.__name__ == "RigolDHO800"
     assert RigolScope.__name__ == "RigolScope"
