@@ -4,10 +4,13 @@ Edit the two constants below to enable / configure.
 
     SCOPE_IP     - set to the scope's IPv4 address ("192.168.1.100") to enable
                    the suite. Leave as None to keep every test skipped.
-    DESTRUCTIVE  - False: only read-only and read+restore tests run.
-                   True : also runs setters that mutate scope state and the
-                          ~15 s self-calibration. Only use on a dedicated
-                          test scope.
+    MUTATING     - False: run the read-only / acquisition / report tests.
+                   True : run ONLY the tests that change scope state
+                          (trigger mode cycling, ~15 s self-calibration,
+                          vertical-scale and averaging-count round-trips).
+                          These restore prior state on exit but briefly
+                          disturb the scope, so run them on a scope that
+                          isn't actively acquiring data you care about.
 
 Run with `-s` to see the end-of-session report live:
     pytest tests/test_lecroy_scope_real.py -v -s
@@ -23,7 +26,7 @@ from lab_scopes.lecroy import LeCroyHeader, LeCroyNoDataError, LeCroyScope, WAVE
 
 # === user configuration =====================================================
 SCOPE_IP = "192.168.7.63"
-DESTRUCTIVE = False
+MUTATING = False
 SHOW_PLOT = False  # True: plot displayed traces (V vs s) at end of session
 # ============================================================================
 
@@ -31,10 +34,29 @@ SHOW_PLOT = False  # True: plot displayed traces (V vs s) at end of session
 _real = pytest.mark.skipif(
     not SCOPE_IP, reason="set SCOPE_IP in this test file to test a real LeCroy scope"
 )
-_destructive = pytest.mark.skipif(
-    not DESTRUCTIVE,
-    reason="DESTRUCTIVE=False; skipping state-mutating test",
-)
+# @_mutating bundles two markers: a "mutating" tag so the collection hook can
+# identify these tests, and the MUTATING=False skip. In MUTATING=True mode only
+# tests carrying the "mutating" tag run; everything else is skipped by
+# pytest_collection_modifyitems below.
+def _mutating(func):
+    func = pytest.mark.mutating(func)
+    func = pytest.mark.skipif(
+        not MUTATING, reason="MUTATING=False; skipping state-mutating test"
+    )(func)
+    return func
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "mutating: state-mutating tests run only when MUTATING=True")
+
+
+def pytest_collection_modifyitems(config, items):
+    if not MUTATING:
+        return
+    skip = pytest.mark.skip(reason="MUTATING=True; running only state-mutating tests")
+    for item in items:
+        if "mutating" not in {m.name for m in item.iter_markers()}:
+            item.add_marker(skip)
 
 
 REPORT = {"tests": {}, "traces": {}, "timings": {}, "warnings": [], "waveforms": {}}
@@ -199,7 +221,7 @@ def test_vertical_scale_read(scope, any_displayed_trace):
 
 
 @_real
-@_destructive
+@_mutating
 def test_set_vertical_scale_roundtrip(scope, any_displayed_trace):
     original = scope.vertical_scale(any_displayed_trace)
     try:
@@ -226,7 +248,7 @@ def test_averaging_count_read(scope, any_displayed_channel):
 
 
 @_real
-@_destructive
+@_mutating
 def test_set_averaging_count_roundtrip(scope, any_displayed_channel):
     original = scope.averaging_count(any_displayed_channel)
     try:
@@ -400,7 +422,7 @@ def test_expanded_name_lookup(scope):
 
 
 @_real
-@_destructive
+@_mutating
 def test_set_trigger_mode_cycle(scope):
     original = scope.set_trigger_mode("")  # query-only path
     try:
@@ -420,7 +442,7 @@ def test_set_trigger_mode_cycle(scope):
 
 
 @_real
-@_destructive
+@_mutating
 def test_calibrate_runs(scope):
     t0 = time.perf_counter()
     scope.calibrate(True)
@@ -531,7 +553,7 @@ def _print_report():
     print("LeCroy real-scope test report")
     print("=" * 78)
     print(f"  SCOPE_IP:    {SCOPE_IP}")
-    print(f"  DESTRUCTIVE: {DESTRUCTIVE}")
+    print(f"  MUTATING:    {MUTATING}")
     print()
 
     # --- per-trace metadata ---

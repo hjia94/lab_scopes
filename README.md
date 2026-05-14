@@ -26,7 +26,7 @@ For development: pip install -e .
 New code:
 
 ```python
-from lab_scopes.lecroy import LeCroyScope, LeCroyHeader
+from lab_scopes.lecroy import LeCroyScope, LeCroyWavedesc
 from lab_scopes.rigol import RigolDHO800, RigolScope
 from lab_scopes.io.lecroy_files import read_trc_data_simplified
 ```
@@ -39,4 +39,72 @@ from LeCroy_Scope_Header import LeCroy_Scope_Header
 from read_scope_data import read_trc_data_simplified
 from rigol_scope import RigolScope
 from rigol_dho800 import RigolDHO800
+```
+
+## Tests
+
+The test files import the installed `lab_scopes` package, so you do **not**
+need to clone the repo. Install the package plus `pytest`, then download
+the test file you want to run.
+
+```terminal
+pip install "git+https://github.com/hjia94/lab_scopes.git" pytest
+```
+
+### LeCroy scope
+
+The file [tests/test_lecroy_scope_real.py](tests/test_lecroy_scope_real.py)
+exercises ~20 areas of the `LeCroyScope` driver against a live instrument:
+connection and `*IDN?`, channel/trace validation, displayed-channel
+discovery, `max_samples`, vertical scale, averaging, raw and scaled
+acquisition with a single-fetch raw↔scaled cross-check, header parsing,
+`time_array`, sequence mode (auto-skipped if not active), and status
+messages.
+
+The suite has two mutually exclusive modes selected by the
+`MUTATING` flag:
+
+- `MUTATING = False` (default) runs the read-only and acquisition tests
+  above plus the end-of-session report.
+- `MUTATING = True` runs **only** tests that will alter scope: trigger-mode
+  cycling, `*CAL?` self-calibration (~15 s), and the vertical-scale and
+  averaging-count round-trips.
+
+1. Download the test file into any working directory.
+
+2. Open `test_lecroy_scope_real.py` and edit the constants at the top:
+
+   ```python
+   SCOPE_IP  = "192.168.1.100"  # leave None to keep every test skipped
+   MUTATING  = False            # True runs ONLY the state-mutating tests
+   SHOW_PLOT = False            # True plots displayed traces at end of run
+   ```
+   - `SHOW_PLOT = True` → after the textual report, opens a matplotlib
+     figure with one subplot per displayed trace (V vs s, axis units
+     auto-scaled). Requires `MUTATING = False`.
+
+3. Run with `-s` so the end-of-session report prints live:
+
+   ```terminal
+   pytest test_lecroy_scope_real.py -v -s
+   ```
+
+   The report lists per-trace metadata (samples, dt, sampling rate,
+   vertical gain/offset, V/div, coupling, record type, timebase,
+   sweeps_per_acq, segments), transfer timings (bytes / seconds / MB/s
+   from a warm post-warmup `acquire_bytes`), a PASS/SKIP line for every
+   test with a one-line fact, and any non-fatal warnings (empty
+   `valid_trace_names`, only one displayed trace, etc.).
+
+Trace selection is automatic: the suite calls `displayed_traces()` /
+`displayed_channels()` and uses the first one available. Per-trace tests
+skip individually if nothing is on screen.
+
+### Offline suite (no hardware)
+
+If you do clone the repo, the offline synthetic suite runs with:
+
+```terminal
+pip install -e ".[dev]"
+pytest tests/test_lecroy_scope_acquire.py -v
 ```
