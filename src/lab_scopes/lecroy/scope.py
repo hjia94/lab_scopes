@@ -370,15 +370,14 @@ class LeCroyScope:
         return data.astype(np.float64, copy=False) * wd.vertical_gain - wd.vertical_offset
 
     def acquire_sequence_data(self, trace):
-        trace_bytes, wavedesc_bytes = self.acquire_bytes(trace, seg=0)
+        _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
         wd = self.translate_wavedesc_bytes(wavedesc_bytes)
         if wd.subarray_count < 2:
             raise RuntimeError("Sequence mode requires at least 2 segments.")
-        self.wd = wd
-        NSamples, ndx0 = self.parse_wavedesc(wd)
-        total_samples = NSamples * wd.subarray_count
-        data = self._parse_wave_array(trace_bytes, wd, total_samples, ndx0, raw=False)
-        segment_data = list(data.reshape(wd.subarray_count, NSamples))
+        segment_data = []
+        for segment in range(1, wd.subarray_count + 1):
+            data, _ = self.acquire(trace, segment)
+            segment_data.append(data)
         return segment_data, wavedesc_bytes
 
     def time_array(self, trace=None):
