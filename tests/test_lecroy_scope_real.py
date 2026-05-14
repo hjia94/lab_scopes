@@ -24,6 +24,7 @@ from lab_scopes.lecroy import LeCroyHeader, LeCroyNoDataError, LeCroyScope, WAVE
 # === user configuration =====================================================
 SCOPE_IP = "192.168.7.63"
 DESTRUCTIVE = False
+SHOW_PLOT = False  # True: plot displayed traces (V vs s) at end of session
 # ============================================================================
 
 
@@ -36,7 +37,7 @@ _destructive = pytest.mark.skipif(
 )
 
 
-REPORT = {"tests": {}, "traces": {}, "timings": {}, "warnings": []}
+REPORT = {"tests": {}, "traces": {}, "timings": {}, "warnings": [], "waveforms": {}}
 
 
 def _note(name, msg):
@@ -92,6 +93,8 @@ def _final_report():
     if not SCOPE_IP:
         return
     _print_report()
+    if SHOW_PLOT and REPORT["waveforms"]:
+        _plot_waveforms()
 
 
 def _record_skip(name, reason):
@@ -452,7 +455,7 @@ def test_zz_collect_trace_report(scope):
 
             hdr = scope.translate_header_bytes(header_bytes)
             try:
-                NSamples, _ = scope.parse_header(hdr)
+                NSamples, ndx0 = scope.parse_header(hdr)
             except RuntimeError as e:
                 _warn(f"{tr}: parse_header failed ({e}); skipping in report")
                 continue
@@ -488,6 +491,19 @@ def test_zz_collect_trace_report(scope):
                 "seconds": elapsed,
                 "MB_per_s": (nbytes / 1e6) / elapsed if elapsed > 0 else float("inf"),
             }
+
+            if SHOW_PLOT:
+                try:
+                    data = scope._parse_wave_array(trace_bytes, hdr, NSamples, ndx0, raw=False)
+                    t = np.linspace(
+                        float(hdr.horiz_offset),
+                        float(hdr.horiz_offset) + NSamples * float(hdr.horiz_interval),
+                        NSamples,
+                        endpoint=False,
+                    )
+                    REPORT["waveforms"][tr] = (t, np.asarray(data, dtype=np.float64))
+                except Exception as e:
+                    _warn(f"{tr}: waveform capture for plot failed: {type(e).__name__}: {e}")
         except Exception as e:
             _warn(f"{tr}: report collection raised {type(e).__name__}: {e}")
 
@@ -588,3 +604,34 @@ def _print_report():
         print()
 
     print("=" * 78)
+
+
+def _eng_scale(max_abs, units):
+    for prefix, factor in units:
+        if max_abs >= factor:
+            return prefix, factor
+    return units[-1]
+
+
+def _plot_waveforms():
+    import matplotlib.pyplot as plt
+
+    waveforms = REPORT["waveforms"]
+    n = len(waveforms)
+    fig, axes = plt.subplots(n, 1, sharex=False, figsize=(9, 2.2 * n + 0.6), squeeze=False)
+    for ax, (tr, (t, y)) in zip(axes[:, 0], waveforms.items()):
+        t_prefix, t_factor = _eng_scale(
+            float(np.max(np.abs(t))) if t.size else 1.0,
+            [("s", 1.0), ("ms", 1e-3), ("us", 1e-6), ("ns", 1e-9), ("ps", 1e-12)],
+        )
+        y_prefix, y_factor = _eng_scale(
+            float(np.max(np.abs(y))) if y.size else 1.0,
+            [("V", 1.0), ("mV", 1e-3), ("uV", 1e-6)],
+        )
+        ax.plot(t / t_factor, y / y_factor, linewidth=0.8)
+        ax.set_xlabel(f"time ({t_prefix})")
+        ax.set_ylabel(f"{tr} ({y_prefix})")
+        ax.grid(True, alpha=0.3)
+    fig.suptitle(f"LeCroy {SCOPE_IP} - displayed traces")
+    fig.tight_layout()
+    plt.show()
