@@ -54,15 +54,28 @@ class LeCroyVICPTransport:
     def __init__(self, host: str, port: int = VICP_PORT, timeout: float = 5.0):
         self.host = host
         self.port = port
-        self.timeout = timeout
+        self._timeout = timeout
         self.chunk_size = 1024 * 1024
         self._sequence = 0
         self._sock: socket.socket | None = None
 
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value: float) -> None:
+        # Why: callers (e.g. calibrate()) temporarily raise the timeout for
+        # long-running queries like *CAL?. Mutating only the attribute leaves
+        # the live socket at its original timeout, so reads still abort early.
+        self._timeout = float(value)
+        if self._sock is not None:
+            self._sock.settimeout(self._timeout)
+
     def open(self) -> None:
         try:
-            self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
-            self._sock.settimeout(self.timeout)
+            self._sock = socket.create_connection((self.host, self.port), timeout=self._timeout)
+            self._sock.settimeout(self._timeout)
         except OSError as exc:
             raise ScopeConnectionError(f"cannot connect to LeCroy scope at {self.host}:{self.port}: {exc}") from exc
 
