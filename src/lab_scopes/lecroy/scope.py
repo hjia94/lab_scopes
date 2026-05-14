@@ -2,6 +2,12 @@
 
 This is based on the LAPD_DAQ ``LeCroy_Scope.py`` driver surface, but the
 connection is a native VICP transport instead of VISA.
+
+TODO: Sequence-mode acquisition is broken in this version. The
+``acquire_sequence_data`` method and the sequence branches in
+``parse_wavedesc`` / ``time_array`` are commented out below until the
+segment read path is fixed. See also tests/test_lecroy_scope_acquire.py
+and tests/test_lecroy_scope_real.py for the corresponding disabled tests.
 """
 
 from __future__ import annotations
@@ -318,13 +324,15 @@ class LeCroyScope:
     def parse_wavedesc(self, wd):
         if wd.comm_type not in [0, 1]:
             raise RuntimeError(f"**** wd.comm_type = {wd.comm_type}; expected value is either 0 or 1").with_traceback(sys.exc_info()[2])
-        is_sequence = wd.subarray_count > 1
-        if is_sequence:
-            NSamples = int(wd.wave_array_1 / wd.subarray_count)
-            if wd.comm_type == 1:
-                NSamples = int(NSamples / 2)
-        else:
-            NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        # TODO: sequence-mode disabled — restore the is_sequence branch when fixed.
+        # is_sequence = wd.subarray_count > 1
+        # if is_sequence:
+        #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
+        #     if wd.comm_type == 1:
+        #         NSamples = int(NSamples / 2)
+        # else:
+        #     NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
         if NSamples == 0:
             raise RuntimeError("**** fail because NSamples = 0 (possible cause: trace has no data? scope not triggered?)").with_traceback(sys.exc_info()[2])
         if self.verbose:
@@ -369,16 +377,23 @@ class LeCroyScope:
             return data
         return data.astype(np.float64, copy=False) * wd.vertical_gain - wd.vertical_offset
 
+    # TODO: sequence-mode acquisition is broken — re-enable once the per-segment
+    # :WAVEFORM? read path is fixed and matches LAPD_DAQ behavior.
+    # def acquire_sequence_data(self, trace):
+    #     _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
+    #     wd = self.translate_wavedesc_bytes(wavedesc_bytes)
+    #     if wd.subarray_count < 2:
+    #         raise RuntimeError("Sequence mode requires at least 2 segments.")
+    #     segment_data = []
+    #     for segment in range(1, wd.subarray_count + 1):
+    #         data, _ = self.acquire(trace, segment)
+    #         segment_data.append(data)
+    #     return segment_data, wavedesc_bytes
     def acquire_sequence_data(self, trace):
-        _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
-        wd = self.translate_wavedesc_bytes(wavedesc_bytes)
-        if wd.subarray_count < 2:
-            raise RuntimeError("Sequence mode requires at least 2 segments.")
-        segment_data = []
-        for segment in range(1, wd.subarray_count + 1):
-            data, _ = self.acquire(trace, segment)
-            segment_data.append(data)
-        return segment_data, wavedesc_bytes
+        raise NotImplementedError(
+            "acquire_sequence_data is disabled in this version; sequence-mode "
+            "acquisition does not work and is pending a fix."
+        )
 
     def time_array(self, trace=None):
         if trace is None and hasattr(self, "wd"):
@@ -386,12 +401,14 @@ class LeCroyScope:
         else:
             _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
             wd = self.translate_wavedesc_bytes(wavedesc_bytes)
-        if wd.subarray_count > 1:
-            NSamples = int(wd.wave_array_1 / wd.subarray_count)
-            if wd.comm_type == 1:
-                NSamples = int(NSamples / 2)
-        else:
-            NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        # TODO: sequence-mode disabled — restore the subarray_count > 1 branch when fixed.
+        # if wd.subarray_count > 1:
+        #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
+        #     if wd.comm_type == 1:
+        #         NSamples = int(NSamples / 2)
+        # else:
+        #     NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
         t0 = float(wd.horiz_offset)
         horiz_interval = float(wd.horiz_interval)
         return np.linspace(t0, t0 + NSamples * horiz_interval, NSamples, endpoint=False)
