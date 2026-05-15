@@ -20,7 +20,7 @@ OP_LOCKOUT = 0x04
 OP_CLEAR = 0x02
 OP_EOI = 0x01
 
-HEADER_SIZE = 8
+VICP_FRAME_HEADER_SIZE = 8
 
 
 def encode_vicp_message(payload: bytes | str, *, sequence: int = 0, eoi: bool = True) -> bytes:
@@ -28,15 +28,15 @@ def encode_vicp_message(payload: bytes | str, *, sequence: int = 0, eoi: bool = 
     if isinstance(payload, str):
         payload = payload.encode("ascii")
     operation = OP_DATA | OP_REMOTE | (OP_EOI if eoi else 0)
-    header = struct.pack(">BBBBL", operation, VICP_VERSION, sequence & 0xFF, 0, len(payload))
-    return header + payload
+    frame_header = struct.pack(">BBBBL", operation, VICP_VERSION, sequence & 0xFF, 0, len(payload))
+    return frame_header + payload
 
 
-def decode_vicp_header(header: bytes) -> dict[str, int | bool]:
-    """Decode an 8-byte VICP header."""
-    if len(header) != HEADER_SIZE:
-        raise ScopeProtocolError(f"VICP header must be 8 bytes, got {len(header)}")
-    operation, version, sequence, spare, payload_len = struct.unpack(">BBBBL", header)
+def decode_vicp_frame_header(frame_header: bytes) -> dict[str, int | bool]:
+    """Decode an 8-byte VICP frame header."""
+    if len(frame_header) != VICP_FRAME_HEADER_SIZE:
+        raise ScopeProtocolError(f"VICP frame header must be 8 bytes, got {len(frame_header)}")
+    operation, version, sequence, spare, payload_len = struct.unpack(">BBBBL", frame_header)
     return {
         "operation": operation,
         "version": version,
@@ -54,15 +54,28 @@ class LeCroyVICPTransport:
     def __init__(self, host: str, port: int = VICP_PORT, timeout: float = 5.0):
         self.host = host
         self.port = port
-        self.timeout = timeout
+        self._timeout = timeout
         self.chunk_size = 1024 * 1024
         self._sequence = 0
         self._sock: socket.socket | None = None
 
+    @property
+    def timeout(self) -> float:
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value: float) -> None:
+        # Why: callers (e.g. calibrate()) temporarily raise the timeout for
+        # long-running queries like *CAL?. Mutating only the attribute leaves
+        # the live socket at its original timeout, so reads still abort early.
+        self._timeout = float(value)
+        if self._sock is not None:
+            self._sock.settimeout(self._timeout)
+
     def open(self) -> None:
         try:
-            self._sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
-            self._sock.settimeout(self.timeout)
+            self._sock = socket.create_connection((self.host, self.port), timeout=self._timeout)
+            self._sock.settimeout(self._timeout)
         except OSError as exc:
             raise ScopeConnectionError(f"cannot connect to LeCroy scope at {self.host}:{self.port}: {exc}") from exc
 
@@ -93,8 +106,8 @@ class LeCroyVICPTransport:
         payloads: list[bytearray] = []
         total_size = 0
         while True:
-            header = self._recv_exact(HEADER_SIZE)
-            decoded = decode_vicp_header(header)
+            frame_header = self._recv_exact(VICP_FRAME_HEADER_SIZE)
+            decoded = decode_vicp_frame_header(frame_header)
             chunk = self._recv_exact_into(int(decoded["payload_len"]))
             payloads.append(chunk)
             total_size += len(chunk)

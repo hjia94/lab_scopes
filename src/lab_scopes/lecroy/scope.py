@@ -2,6 +2,12 @@
 
 This is based on the LAPD_DAQ ``LeCroy_Scope.py`` driver surface, but the
 connection is a native VICP transport instead of VISA.
+
+TODO: Sequence-mode acquisition is broken in this version. The
+``acquire_sequence_data`` method and the sequence branches in
+``parse_wavedesc`` / ``time_array`` are commented out below until the
+segment read path is fixed. See also tests/test_lecroy_scope_acquire.py
+and tests/test_lecroy_scope_real.py for the corresponding disabled tests.
 """
 
 from __future__ import annotations
@@ -27,6 +33,35 @@ from .constants import (
     WAVEDESC_FMT,
     WAVEDESC_SIZE,
 )
+
+
+class LeCroyNoDataError(RuntimeError):
+    """Raised when a trace's :WAVEFORM? response carries no curve data.
+
+    Why: math/measurement traces can be "ON" with no source assigned, so they
+    accept :WAVEFORM? but return a payload too short to contain a WAVEDESC.
+    """
+
+
+def _vbs_int(resp, default: int = 0) -> int:
+    # MAUI VBS reads on inactive math/measurement traces return the literal "OFF".
+    s = resp.strip() if isinstance(resp, str) else resp
+    if not s or (isinstance(s, str) and s.upper() == "OFF"):
+        return default
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _vbs_float(resp, default: float = 0.0) -> float:
+    s = resp.strip() if isinstance(resp, str) else resp
+    if not s or (isinstance(s, str) and s.upper() == "OFF"):
+        return default
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
 
 
 class LeCroyScope:
@@ -57,9 +92,8 @@ class LeCroyScope:
         if len(self.valid_trace_names) == 0:
             for tr in KNOWN_TRACE_NAMES:
                 try:
-                    self.scope.write(tr + ":TRACE?")
-                    self.scope.write("CMR?")
-                    error_code = int(self.scope.read())
+                    self.scope.query(tr + ":TRACE?")
+                    error_code = int(self.scope.query("CMR?"))
                 except Exception:
                     continue
                 if error_code == 0:
@@ -167,7 +201,7 @@ class LeCroyScope:
     def max_samples(self, N=0) -> int:
         if N > 0:
             self.scope.write('VBS "app.Acquisition.Horizontal.MaxSamples=' + str(N) + '"')
-        return int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'))
+        return _vbs_int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'), 0)
 
     def displayed_channels(self) -> Tuple[str, ...]:
         channels = ()
@@ -187,7 +221,7 @@ class LeCroyScope:
 
     def vertical_scale(self, trace) -> float:
         Tn = self.validate_trace(trace)
-        return float(self.scope.query('VBS? "Return=app.Acquisition.' + Tn + '.VerScale"'))
+        return _vbs_float(self.scope.query('VBS? "Return=app.Acquisition.' + Tn + '.VerScale"'), 0.0)
 
     def set_vertical_scale(self, trace, scale) -> float:
         Tn = self.validate_trace(trace)
@@ -197,7 +231,7 @@ class LeCroyScope:
 
     def averaging_count(self, channel="C1") -> int:
         Cn = self.validate_channel(channel)
-        return int(self.scope.query('VBS? "Return=app.Acquisition.' + Cn + '.AverageSweeps"'))
+        return _vbs_int(self.scope.query('VBS? "Return=app.Acquisition.' + Cn + '.AverageSweeps"'), 1)
 
     def set_averaging_count(self, channel="C1", NSweeps=1):
         Cn = self.validate_channel(channel)
@@ -243,18 +277,18 @@ class LeCroyScope:
     def wait_for_sweeps(self, channel, NSweeps, timeout=100, sleep_interval=0.1):
         channel = self.validate_channel(channel)
         self.scope.write(channel + ":WAVEFORM?")
-        hdr_bytes = self.scope.read_raw()
-        initial_sweeps_per_acq = struct.unpack("=l", hdr_bytes[15 + 148:15 + 148 + 4])[0]
+        trace_bytes = self.scope.read_raw()
+        initial_sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
         self.set_trigger_mode("AUTO")
         self.scope.write("CLEAR_SWEEPS")
         time.sleep(0.25)
         self.set_trigger_mode("NORM")
-        sweeps_per_acq = struct.unpack("=l", hdr_bytes[15 + 148:15 + 148 + 4])[0]
+        sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
         clear_sweeps_timeout = time.time() + 10
         while time.time() < clear_sweeps_timeout and sweeps_per_acq > 1:
             self.scope.write(channel + ":WAVEFORM?")
-            hdr_bytes = self.scope.read_raw()
-            sweeps_per_acq = struct.unpack("=l", hdr_bytes[15 + 148:15 + 148 + 4])[0]
+            trace_bytes = self.scope.read_raw()
+            sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
             if sweeps_per_acq < initial_sweeps_per_acq or sweeps_per_acq == 1:
                 break
         self.scope.write("COMM_FORMAT DEF9,BYTE,BIN")
@@ -267,8 +301,8 @@ class LeCroyScope:
         while time.time() < deadline:
             time.sleep(sleep_interval)
             self.scope.write(channel + ":WAVEFORM?")
-            hdr_bytes = self.scope.read_raw()
-            sweeps_per_acq = struct.unpack("=l", hdr_bytes[15 + 148:15 + 148 + 4])[0]
+            trace_bytes = self.scope.read_raw()
+            sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
             gaaak = sweeps_per_acq
             if sweeps_per_acq >= NSweeps:
                 timed_out = False
@@ -276,36 +310,38 @@ class LeCroyScope:
             print(f"\r      Waiting for {NSweeps} sweeps: {sweeps_per_acq}/{NSweeps}", end="", flush=True)
         self.set_trigger_mode("STOP")
         self.scope.write(channel + ":WAVEFORM?")
-        hdr_bytes = self.scope.read_raw()
-        sweeps_per_acq = struct.unpack("=l", hdr_bytes[15 + 148:15 + 148 + 4])[0]
+        trace_bytes = self.scope.read_raw()
+        sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
         if gaaak > sweeps_per_acq:
             self.gaaak_count += 1
             return self.wait_for_sweeps(channel, NSweeps, timeout, sleep_interval)
         print(f"\r      Waiting for {NSweeps} sweeps: {sweeps_per_acq}/{NSweeps} - Complete!")
         return timed_out, sweeps_per_acq
 
-    def translate_header_bytes(self, header_bytes) -> WAVEDESC:
-        return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, header_bytes))
+    def translate_wavedesc_bytes(self, wavedesc_bytes) -> WAVEDESC:
+        return WAVEDESC._make(struct.unpack(WAVEDESC_FMT, wavedesc_bytes))
 
-    def parse_header(self, hdr):
-        if hdr.comm_type not in [0, 1]:
-            raise RuntimeError(f"**** hdr.comm_type = {hdr.comm_type}; expected value is either 0 or 1").with_traceback(sys.exc_info()[2])
-        is_sequence = hdr.subarray_count > 1
-        if is_sequence:
-            NSamples = int(hdr.wave_array_1 / hdr.subarray_count)
-            if hdr.comm_type == 1:
-                NSamples = int(NSamples / 2)
-        else:
-            NSamples = hdr.wave_array_1 if hdr.comm_type == 0 else int(hdr.wave_array_1 / 2)
+    def parse_wavedesc(self, wd):
+        if wd.comm_type not in [0, 1]:
+            raise RuntimeError(f"**** wd.comm_type = {wd.comm_type}; expected value is either 0 or 1").with_traceback(sys.exc_info()[2])
+        # TODO: sequence-mode disabled — restore the is_sequence branch when fixed.
+        # is_sequence = wd.subarray_count > 1
+        # if is_sequence:
+        #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
+        #     if wd.comm_type == 1:
+        #         NSamples = int(NSamples / 2)
+        # else:
+        #     NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
         if NSamples == 0:
             raise RuntimeError("**** fail because NSamples = 0 (possible cause: trace has no data? scope not triggered?)").with_traceback(sys.exc_info()[2])
         if self.verbose:
-            print("<:> record type:      ", RECORD_TYPES[hdr.record_type])
-            print("<:> timebase:         ", TIMEBASE_IDS[hdr.timebase], "per div")
-            print("<:> vertical gain:    ", VERT_GAIN_IDS[hdr.fixed_vert_gain], "per div")
-            print("<:> vertical coupling:", VERT_COUPLINGS[hdr.vert_coupling])
-            print("<:> processing:       ", PROCESSING_TYPES[hdr.processing_done])
-        ndx0 = (15 + WAVEDESC_SIZE) + hdr.user_text + hdr.trigtime_array + hdr.ris_time_array + hdr.res_array1
+            print("<:> record type:      ", RECORD_TYPES[wd.record_type])
+            print("<:> timebase:         ", TIMEBASE_IDS[wd.timebase], "per div")
+            print("<:> vertical gain:    ", VERT_GAIN_IDS[wd.fixed_vert_gain], "per div")
+            print("<:> vertical coupling:", VERT_COUPLINGS[wd.vert_coupling])
+            print("<:> processing:       ", PROCESSING_TYPES[wd.processing_done])
+        ndx0 = (15 + WAVEDESC_SIZE) + wd.user_text + wd.trigtime_array + wd.ris_time_array + wd.res_array1
         return NSamples, ndx0
 
     def acquire_bytes(self, trace, seg=0):
@@ -315,50 +351,66 @@ class LeCroyScope:
             print("\n<:> reading", trace, "from scope")
         self.scope.write(trace + ":WAVEFORM?")
         trace_bytes = self.scope.read_raw()
-        header_bytes = trace_bytes[15:15 + WAVEDESC_SIZE]
+        if len(trace_bytes) < 15 + WAVEDESC_SIZE:
+            raise LeCroyNoDataError(
+                f"{trace}: :WAVEFORM? returned {len(trace_bytes)} bytes "
+                f"(need >= {15 + WAVEDESC_SIZE}); trace likely has no data"
+            )
+        wavedesc_bytes = trace_bytes[15:15 + WAVEDESC_SIZE]
         self.trace_bytes = trace_bytes
-        return trace_bytes, header_bytes
+        return trace_bytes, wavedesc_bytes
 
     def acquire(self, trace, seg=0, raw=False):
-        trace_bytes, header_bytes = self.acquire_bytes(trace, seg)
-        hdr = self.translate_header_bytes(header_bytes)
-        self.hdr = hdr
-        NSamples, ndx0 = self.parse_header(hdr)
-        if hdr.comm_type == 1:
-            ndx1 = ndx0 + NSamples * 2
-            wdata = struct.unpack(str(NSamples) + "h", trace_bytes[ndx0:ndx1])
-            data = wdata if raw else np.array(wdata) * hdr.vertical_gain - hdr.vertical_offset
-        else:
-            ndx1 = ndx0 + NSamples
-            cdata = struct.unpack(str(NSamples) + "b", trace_bytes[ndx0:ndx1])
-            data = cdata if raw else np.array(cdata) * hdr.vertical_gain - hdr.vertical_offset
-        return data, header_bytes
+        trace_bytes, wavedesc_bytes = self.acquire_bytes(trace, seg)
+        wd = self.translate_wavedesc_bytes(wavedesc_bytes)
+        self.wd = wd
+        NSamples, ndx0 = self.parse_wavedesc(wd)
+        data = self._parse_wave_array(trace_bytes, wd, NSamples, ndx0, raw=raw)
+        return data, wavedesc_bytes
 
+    def _parse_wave_array(self, trace_bytes, wd, NSamples, ndx0, raw=False):
+        if wd.comm_type == 1:
+            data = np.frombuffer(trace_bytes, dtype="<i2", count=NSamples, offset=ndx0)
+        else:
+            data = np.frombuffer(trace_bytes, dtype=np.int8, count=NSamples, offset=ndx0)
+        if raw:
+            return data
+        return data.astype(np.float64, copy=False) * wd.vertical_gain - wd.vertical_offset
+
+    # TODO: sequence-mode acquisition is broken — re-enable once the per-segment
+    # :WAVEFORM? read path is fixed and matches LAPD_DAQ behavior.
+    # def acquire_sequence_data(self, trace):
+    #     _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
+    #     wd = self.translate_wavedesc_bytes(wavedesc_bytes)
+    #     if wd.subarray_count < 2:
+    #         raise RuntimeError("Sequence mode requires at least 2 segments.")
+    #     segment_data = []
+    #     for segment in range(1, wd.subarray_count + 1):
+    #         data, _ = self.acquire(trace, segment)
+    #         segment_data.append(data)
+    #     return segment_data, wavedesc_bytes
     def acquire_sequence_data(self, trace):
-        _trace_bytes, header_bytes = self.acquire_bytes(trace)
-        hdr = self.translate_header_bytes(header_bytes)
-        if hdr.subarray_count < 2:
-            raise RuntimeError("Sequence mode requires at least 2 segments.")
-        segment_data = []
-        for segment in range(1, hdr.subarray_count + 1):
-            data, _ = self.acquire(trace, segment)
-            segment_data.append(data)
-        return segment_data, header_bytes
+        raise NotImplementedError(
+            "acquire_sequence_data is disabled in this version; sequence-mode "
+            "acquisition does not work and is pending a fix."
+        )
 
     def time_array(self, trace=None):
-        if trace is None and hasattr(self, "hdr"):
-            hdr = self.hdr
+        if trace is None and hasattr(self, "wd"):
+            wd = self.wd
         else:
-            _trace_bytes, header_bytes = self.acquire_bytes(trace)
-            hdr = self.translate_header_bytes(header_bytes)
-        if hdr.subarray_count > 1:
-            NSamples = int(hdr.wave_array_1 / hdr.subarray_count)
-            if hdr.comm_type == 1:
-                NSamples = int(NSamples / 2)
-        else:
-            NSamples = hdr.wave_array_1 if hdr.comm_type == 0 else int(hdr.wave_array_1 / 2)
-        t0 = float(hdr.horiz_offset)
-        horiz_interval = float(hdr.horiz_interval)
+            _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
+            wd = self.translate_wavedesc_bytes(wavedesc_bytes)
+        # TODO: sequence-mode disabled — restore the subarray_count > 1 branch when fixed.
+        # if wd.subarray_count > 1:
+        #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
+        #     if wd.comm_type == 1:
+        #         NSamples = int(NSamples / 2)
+        # else:
+        #     NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        t0 = float(wd.horiz_offset)
+        horiz_interval = float(wd.horiz_interval)
         return np.linspace(t0, t0 + NSamples * horiz_interval, NSamples, endpoint=False)
 
     def get_sequence_trigger_times(self):
@@ -401,10 +453,20 @@ class LeCroyScope:
 
     def calibrate(self, a=True):
         if a:
-            self.scope.write("*CAL?")
-            time.sleep(15)
+            prev_timeout = self.scope.timeout
+            self.scope.timeout = max(prev_timeout, 60.0)
+            try:
+                self.scope.query("*CAL?")
+            finally:
+                self.scope.timeout = prev_timeout
         else:
             self.scope.write("AUTO_CALIBRATE OFF")
+
+    # Deprecated method aliases retained for one release. Prefer the *_wavedesc
+    # names; the WAVEDESC is what these methods actually operate on, not the
+    # 8-byte VICP frame header nor the IEEE 488.2 TMC block prefix.
+    translate_header_bytes = translate_wavedesc_bytes
+    parse_header = parse_wavedesc
 
 
 class Fake_Scope:

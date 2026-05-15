@@ -7,9 +7,9 @@ Note: when saving on scope, need to choose binary with word format
 
 read_trc_data(file path) => signal, time array
 	read binary file with open()
-	first 11 bytes includes data_size information
-	header information is encoded in the next 346 bytes which is decoded by LeCroy_Scope_Header.py
-	data bytes are decoded using struct.unpack(). Each data point uses 2 bytes. Real voltage value is converted using header info
+	first 11 bytes is an IEEE 488.2 TMC #9NNNNNNNNN block-length prefix
+	WAVEDESC (346-byte waveform descriptor) is in the next 346 bytes; decoded by lab_scopes.lecroy.wavedesc.LeCroyWavedesc
+	data bytes are decoded using struct.unpack(). Each data point uses 2 bytes. Real voltage value is converted using WAVEDESC info
 ---------------------------------------------------------------------------
 Note: when saving on scope, need to choose ascii and ',' as deliminator
 
@@ -18,7 +18,7 @@ read_txt_data(file path) => signal, time array
 	use numpy.loadtxt() to read the data and time array
 ---------------------------------------------------------------------------
 compare_trigger_times(file path1, file path2) => True/False
-	compare the trigger time information in the header of two .trc files
+	compare the trigger time information in the WAVEDESC of two .trc files
 	return True if they are the same, False if not
 --------------------------------------------------------------------------
 read_hdf5_scope_tarr(f, scope_name) => time array
@@ -42,22 +42,24 @@ Added functions to read scope data from HDF5 files written by LAPD_DAQ, includin
 
 import numpy as np
 
-from lab_scopes.lecroy import LeCroyHeader as LeCroy_Scope_Header
+from lab_scopes.lecroy import LeCroyWavedesc
 
-TRACE_HEADER_PREFIX_BYTES = 11
-TRACE_HEADER_BYTES = 346
-TRACE_DATA_OFFSET = TRACE_HEADER_PREFIX_BYTES + TRACE_HEADER_BYTES
+# .trc files start with a TMC-style block-length prefix "#9NNNNNNNNN" (11 bytes)
+# declaring the byte count of the WAVEDESC + sample payload that follows.
+TRC_BLOCK_PREFIX_BYTES = 11
+WAVEDESC_BYTES = 346
+TRACE_DATA_OFFSET = TRC_BLOCK_PREFIX_BYTES + WAVEDESC_BYTES
 TRACE_SAMPLE_DTYPE = np.dtype("=i2")
 
 #======================================================================================
 
-def decode_header_info(hdr_bytes):
+def decode_wavedesc(wavedesc_bytes):
 	try:
-		header = LeCroy_Scope_Header(hdr_bytes)
+		wavedesc = LeCroyWavedesc(wavedesc_bytes)
 	except Exception as e:
-		print("Error decoding LeCroy_Scope_Header info:", e)
-		header = None
-	return header
+		print("Error decoding LeCroyWavedesc info:", e)
+		wavedesc = None
+	return wavedesc
 
 #======================================================================================
 
@@ -104,20 +106,20 @@ def get_trigger_time(file_path):
 	if not first_11.startswith('#9'):
 		raise SyntaxError('First two bytes are not #9')
 	
-	hdr_bytes = file_content[11:11+346]
-	header = decode_header_info(hdr_bytes)
-	
-	if header is None:
-		raise ValueError("Could not decode header information")
-	
-	# Extract trigger time components from header
+	wavedesc_bytes = file_content[11:11+346]
+	wavedesc = decode_wavedesc(wavedesc_bytes)
+
+	if wavedesc is None:
+		raise ValueError("Could not decode WAVEDESC information")
+
+	# Extract trigger time components from WAVEDESC
 	# Note: LeCroy stores year as offset from 1900
-	year = header.hdr.tt_year
-	month = header.hdr.tt_months
-	day = header.hdr.tt_days
-	hour = header.hdr.tt_hours
-	minute = header.hdr.tt_minute
-	second = header.hdr.tt_second
+	year = wavedesc.wd.tt_year
+	month = wavedesc.wd.tt_months
+	day = wavedesc.wd.tt_days
+	hour = wavedesc.wd.tt_hours
+	minute = wavedesc.wd.tt_minute
+	second = wavedesc.wd.tt_second
 	
 	
 	return {'year': year, 'month': month, 'day': day, 'hour': hour, 'minute': minute, 'second': second}
@@ -171,53 +173,58 @@ def compare_trigger_times(file_path1, file_path2, debug=False):
 
 #======================================================================================
 
-def read_trc_data(file_path, list_some_header_info=False):
+def read_trc_data(file_path, list_some_wavedesc_info=False):
 
 	file_content = _read_trace_bytes(file_path)
-	
-	first_11 = file_content[:TRACE_HEADER_PREFIX_BYTES].decode()
+
+	first_11 = file_content[:TRC_BLOCK_PREFIX_BYTES].decode()
 
 	if not first_11.startswith('#9'):
 		raise SyntaxError('First two bytes are not #9')
 
-	hdr_bytes = file_content[TRACE_HEADER_PREFIX_BYTES:TRACE_DATA_OFFSET]
-	header = decode_header_info(hdr_bytes)
+	wavedesc_bytes = file_content[TRC_BLOCK_PREFIX_BYTES:TRACE_DATA_OFFSET]
+	wavedesc = decode_wavedesc(wavedesc_bytes)
 
-	data_size = int((int(first_11[2:]) - TRACE_HEADER_BYTES) / 2)
-	if data_size != len(header.time_array):
-		print('Time array length from header %i does not equal %i from first 11 bytes' %(len(header.time_array), data_size))
-	data_size = len(header.time_array)
+	data_size = int((int(first_11[2:]) - WAVEDESC_BYTES) / 2)
+	if data_size != len(wavedesc.time_array):
+		print('Time array length from WAVEDESC %i does not equal %i from first 11 bytes' %(len(wavedesc.time_array), data_size))
+	data_size = len(wavedesc.time_array)
 
-	if list_some_header_info:
-		print("dt =", header.dt)
-		print("t0 =", header.t0)
-		print("vertical_gain =", header.vertical_gain)
-		print("timebase =", header.timebase)
-		print("Input = ", header.vertical_coupling)
+	if list_some_wavedesc_info:
+		print("dt =", wavedesc.dt)
+		print("t0 =", wavedesc.t0)
+		print("vertical_gain =", wavedesc.vertical_gain)
+		print("timebase =", wavedesc.timebase)
+		print("Input = ", wavedesc.vertical_coupling)
 
 	print('Reading data...')
-	data = _scale_trace_data(file_content, data_size, header.hdr.vertical_gain, header.hdr.vertical_offset)
+	data = _scale_trace_data(file_content, data_size, wavedesc.wd.vertical_gain, wavedesc.wd.vertical_offset)
 
 	print('Done')
 
-	return data, header.time_array # signal, time array
+	return data, wavedesc.time_array # signal, time array
 
 #======================================================================================
 def read_trc_data_simplified(file_path):
 
 	file_content = _read_trace_bytes(file_path)
 
-	hdr_bytes = file_content[TRACE_HEADER_PREFIX_BYTES:TRACE_DATA_OFFSET]
-	header = decode_header_info(hdr_bytes)
-	data_size = len(header.time_array)
-	
-	data = _scale_trace_data(file_content, data_size, header.hdr.vertical_gain, header.hdr.vertical_offset)
+	wavedesc_bytes = file_content[TRC_BLOCK_PREFIX_BYTES:TRACE_DATA_OFFSET]
+	wavedesc = decode_wavedesc(wavedesc_bytes)
+	data_size = len(wavedesc.time_array)
 
-	return data, header.time_array, header.hdr.vertical_gain, header.hdr.vertical_offset
+	data = _scale_trace_data(file_content, data_size, wavedesc.wd.vertical_gain, wavedesc.wd.vertical_offset)
 
-def read_trc_data_no_header(file_path, data_size, vertical_gain, vertical_offset):
+	return data, wavedesc.time_array, wavedesc.wd.vertical_gain, wavedesc.wd.vertical_offset
+
+def read_trc_data_no_wavedesc(file_path, data_size, vertical_gain, vertical_offset):
 	file_content = _read_trace_bytes(file_path)
 	return _scale_trace_data(file_content, data_size, vertical_gain, vertical_offset)
+
+
+# Deprecated aliases retained for one release for external callers.
+decode_header_info = decode_wavedesc
+read_trc_data_no_header = read_trc_data_no_wavedesc
 
 #======================================================================================
 
@@ -295,9 +302,9 @@ def read_hdf5_scope_data(f, scope_name, channel_name, shot_number):
 	KeyError
 		If the group or dataset is missing
 	ValueError
-		If the shot is marked as skipped or header cannot be decoded
+		If the shot is marked as skipped or WAVEDESC cannot be decoded
 	"""
-	
+
 	# Fast local lookups
 	try:
 		scope_group = f[scope_name]
@@ -310,22 +317,24 @@ def read_hdf5_scope_data(f, scope_name, channel_name, shot_number):
 		raise ValueError(f"Shot {shot_number} was skipped. Reason: {attrs.get('skip_reason', 'Unknown reason')}")
 
 	data_key = f'{channel_name}_data'
-	header_key = f'{channel_name}_header'
+	# LAPD_DAQ writes the WAVEDESC bytes under "<channel>_header" on disk; keep the
+	# legacy dataset name for backward compatibility with existing HDF5 archives.
+	wavedesc_key = f'{channel_name}_header'
 	try:
 		raw_data = shot_group[data_key][:]
-		header_bytes = shot_group[header_key][()]
+		wavedesc_bytes = shot_group[wavedesc_key][()]
 	except KeyError as e:
 		raise KeyError(f"Missing dataset: {e}")
 
-	header = decode_header_info(header_bytes)
-	if header is None:
-		raise ValueError(f"Could not decode header for {scope_name}/shot_{shot_number}/{channel_name}")
+	wavedesc = decode_wavedesc(wavedesc_bytes)
+	if wavedesc is None:
+		raise ValueError(f"Could not decode WAVEDESC for {scope_name}/shot_{shot_number}/{channel_name}")
 
 	# Vectorized conversion
-	gain = header.hdr.vertical_gain
-	offset = header.hdr.vertical_offset
+	gain = wavedesc.wd.vertical_gain
+	offset = wavedesc.wd.vertical_offset
 	voltage_data = raw_data.astype(np.float64) * gain - offset
-	return voltage_data, header.dt, header.t0
+	return voltage_data, wavedesc.dt, wavedesc.t0
 
 #======================================================================================
 

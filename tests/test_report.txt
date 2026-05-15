@@ -1,0 +1,93 @@
+================================================================================= test session starts ==================================================================================
+platform win32 -- Python 3.12.4, pytest-9.0.3, pluggy-1.6.0 -- C:\ProgramData\anaconda3\python.exe
+cachedir: .pytest_cache
+rootdir: C:\python_scripts\lab_scopes
+configfile: pyproject.toml
+plugins: anyio-4.2.0
+collected 24 items                                                                                                                                                                      
+
+tests/test_lecroy_scope_real.py::test_connect_and_idn PASSED
+tests/test_lecroy_scope_real.py::test_validate_channel_accepts_ints_and_strings PASSED
+tests/test_lecroy_scope_real.py::test_validate_trace_rejects_unknown PASSED
+tests/test_lecroy_scope_real.py::test_valid_trace_names_populated PASSED
+tests/test_lecroy_scope_real.py::test_displayed_channels_subset_of_valid PASSED
+tests/test_lecroy_scope_real.py::test_max_samples_query_is_positive_int SKIPPED (scope reports MaxSamples=OFF (no horizontal acquisition configured))
+tests/test_lecroy_scope_real.py::test_vertical_scale_read SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_set_vertical_scale_roundtrip SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_averaging_count_read SKIPPED (no displayed channels on scope)
+tests/test_lecroy_scope_real.py::test_set_averaging_count_roundtrip SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_max_averaging_count_matches_displayed FAILED
+tests/test_lecroy_scope_real.py::test_acquire_bytes_header_size SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_acquire_raw_int16 SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_acquire_scaled_is_float64 SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_scaled_matches_manual_conversion SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_header_parses_with_known_fields SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_time_array_length_matches_samples SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_time_array_uses_horiz_interval SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_acquire_sequence_when_subarray_count_gt_1 SKIPPED (no displayed traces with usable data)
+tests/test_lecroy_scope_real.py::test_write_status_msg_no_error PASSED
+tests/test_lecroy_scope_real.py::test_expanded_name_lookup PASSED
+tests/test_lecroy_scope_real.py::test_set_trigger_mode_cycle SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_calibrate_runs SKIPPED (DESTRUCTIVE=False; skipping state-mutating test)
+tests/test_lecroy_scope_real.py::test_zz_collect_trace_report PASSEDLeCroy_Scope:__exit__() called  at Thu May 14 13:41:28 2026
+
+==============================================================================
+LeCroy real-scope test report
+==============================================================================
+  SCOPE_IP:    192.168.7.63
+  DESTRUCTIVE: False
+
+Test results
+------------------------------------------------------------------------------
+  [PASS] test_connect_and_idn: IDN='LECROY,WP404HD,LCRY4609N02882,10.8.0'
+  [PASS] test_validate_channel_accepts_ints_and_strings: C1, 3->C3, rejects C9/0
+  [PASS] test_validate_trace_rejects_unknown: valid_trace_names=('C2', 'C4', 'F2', 'F4', 'F6', 'F8', 'M2', 'M4', 'TB', 'TD')
+  [PASS] test_valid_trace_names_populated: 10 valid trace names
+  [PASS] test_displayed_channels_subset_of_valid: channels=(), traces=()
+  [PASS] test_write_status_msg_no_error: short + long both accepted
+  [PASS] test_expanded_name_lookup: C1 -> 'Channel1'
+  [PASS] test_zz_collect_trace_report: profiled 0/2 traces
+
+Warnings
+------------------------------------------------------------------------------
+  ! only 0 displayed trace(s); multi-trace coverage limited
+  ! any_displayed_trace skipped: F8: F8: :WAVEFORM? returned 4 bytes (need >= 361); trace likely has no data; M2: M2: :WAVEFORM? returned 4 bytes (need >= 361); trace likely has no data; TD: TD: :WAVEFORM? returned 4 bytes (need >= 361); trace likely has no data
+  ! TB: report collection raised LeCroyNoDataError: TB: :WAVEFORM? returned 4 bytes (need >= 361); trace likely has no data
+  ! TD: report collection raised LeCroyNoDataError: TD: :WAVEFORM? returned 4 bytes (need >= 361); trace likely has no data
+
+==============================================================================
+
+
+======================================================================================= FAILURES =======================================================================================
+______________________________________________________________________ test_max_averaging_count_matches_displayed ______________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x0000017E627D5C10>
+
+    @_real
+    def test_max_averaging_count_matches_displayed(scope):
+        if not scope.displayed_channels():
+            pytest.skip("no displayed channels")
+>       n, ch = scope.max_averaging_count()
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests\test_lecroy_scope_real.py:244: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x0000017E627D5C10>
+
+    def max_averaging_count(self) -> Tuple[int, str]:
+        NSweeps = 0
+        ach = None
+        for ch in self.displayed_channels():
+            n = self.averaging_count(ch)
+            if n > NSweeps:
+                NSweeps = n
+                ach = ch
+        if ach is None:
+>           raise RuntimeError("**** max_averaging_count(): no displayed channels").with_traceback(sys.exc_info()[2])
+E           RuntimeError: **** max_averaging_count(): no displayed channels
+
+src\lab_scopes\lecroy\scope.py:245: RuntimeError
+=============================================================================== short test summary info ================================================================================
+FAILED tests/test_lecroy_scope_real.py::test_max_averaging_count_matches_displayed - RuntimeError: **** max_averaging_count(): no displayed channels
+======================================================================= 1 failed, 8 passed, 15 skipped in 0.52s ========================================================================
