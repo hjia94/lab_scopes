@@ -7,6 +7,15 @@ Rigol DHO800/DHO900 communication uses plain TCP/SCPI.
 
 LeCroy `.trc` readers work offline.
 
+## What's new in 0.2.0
+
+- Faster LeCroy waveform acquisition (optimized VICP transfer path, single-fetch raw↔scaled cross-check).
+- Hardened SCPI/VBS response handling: drained query responses for trace-name probe and `*CAL?`, graceful handling of `OFF` VBS replies and empty `:WAVEFORM?` buffers, corrected socket-timeout behavior.
+- Renamed internals for clarity: `header` → `wavedesc`, `HEADER_SIZE` → `VICP_FRAME_HEADER_SIZE`.
+- Expanded real-hardware test suite (`tests/test_lecroy_scope_real.py`) with end-of-session report, optional waveform plotting, and a `MUTATING` flag for state-altering tests.
+
+**Known limitation:** sequence/segment acquisition is currently disabled and not available in this release. Use single-shot acquisition; segment mode will return in a later version.
+
 ## Install
 
 ```terminal
