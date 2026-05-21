@@ -85,6 +85,39 @@ def _h5py():
 
 #======================================================================================
 
+def open_hdf5_readonly(path):
+	"""Open an HDF5 archive read-only without contending for the file lock.
+
+	Returns an open ``h5py.File`` the caller must close (use as a context
+	manager). The point of this helper is so multiple analysis scripts -- and
+	the live DAQ writer -- can touch the same file at once without blocking each
+	other or raising "unable to lock file" on Windows, where the HDF5 file lock
+	is mandatory.
+
+	Strategy, most-cooperative first:
+	  1. ``swmr=True`` -- Single-Writer/Multiple-Reader. Readers take no lock that
+	     conflicts with an appending writer, and see a consistent view. Requires
+	     the file to have been written with ``libver='latest'``.
+	  2. ``locking='best-effort'`` -- newer h5py/HDF5: open read-only but don't
+	     fail if the lock can't be taken (older files not written for SWMR).
+	  3. plain ``'r'`` -- last resort for ancient builds without ``locking``.
+
+	All paths open read-only, so none of them can ever modify or corrupt the
+	file; the fallbacks only affect *locking* behavior, not the bytes read.
+	"""
+	h5py = _h5py()
+	try:
+		return h5py.File(path, "r", swmr=True)
+	except Exception:
+		pass
+	try:
+		return h5py.File(path, "r", locking="best-effort")
+	except (TypeError, ValueError):
+		# Old h5py without the `locking` kwarg.
+		return h5py.File(path, "r")
+
+#======================================================================================
+
 def get_trigger_time(file_path):
 	"""
 	Extract trigger timing information from LeCroy scope file header.
