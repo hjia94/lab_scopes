@@ -350,24 +350,122 @@ def read_hdf5_scope_data(f, scope_name, channel_name, shot_number):
 		raise ValueError(f"Shot {shot_number} was skipped. Reason: {attrs.get('skip_reason', 'Unknown reason')}")
 
 	data_key = f'{channel_name}_data'
-	# LAPD_DAQ writes the WAVEDESC bytes under "<channel>_header" on disk; keep the
-	# legacy dataset name for backward compatibility with existing HDF5 archives.
-	wavedesc_key = f'{channel_name}_header'
 	try:
 		raw_data = shot_group[data_key][:]
-		wavedesc_bytes = shot_group[wavedesc_key][()]
 	except KeyError as e:
 		raise KeyError(f"Missing dataset: {e}")
 
+	# gain/offset/dt/t0 come from the channel's WAVEDESC (decoded here once).
+	gain, offset, dt, t0 = _scope_channel_scaling(f, scope_name, channel_name, shot_number)
+
+	# Vectorized conversion
+	voltage_data = raw_data.astype(np.float64) * gain - offset
+	return voltage_data, dt, t0
+
+#======================================================================================
+
+def _scope_channel_scaling(f, scope_name, channel_name, shot_number):
+	"""Decode ``(vertical_gain, vertical_offset, dt, t0)`` from one shot's WAVEDESC.
+
+	These scaling constants are identical across all shots of a given channel, so
+	a reader walking many shots should decode them ONCE (see
+	``read_hdf5_scope_channel_shots``) rather than per shot.
+
+	LAPD_DAQ writes the WAVEDESC bytes under ``"<channel>_header"`` on disk; the
+	legacy dataset name is kept for backward compatibility with existing archives.
+	"""
+	try:
+		shot_group = f[scope_name][f'shot_{shot_number}']
+		wavedesc_bytes = shot_group[f'{channel_name}_header'][()]
+	except KeyError as e:
+		raise KeyError(f"Missing dataset: {e}")
 	wavedesc = decode_wavedesc(wavedesc_bytes)
 	if wavedesc is None:
 		raise ValueError(f"Could not decode WAVEDESC for {scope_name}/shot_{shot_number}/{channel_name}")
+	return wavedesc.wd.vertical_gain, wavedesc.wd.vertical_offset, wavedesc.dt, wavedesc.t0
 
-	# Vectorized conversion
-	gain = wavedesc.wd.vertical_gain
-	offset = wavedesc.wd.vertical_offset
-	voltage_data = raw_data.astype(np.float64) * gain - offset
-	return voltage_data, wavedesc.dt, wavedesc.t0
+#======================================================================================
+
+def read_hdf5_scope_channel_shots(f, scope_name, channel_name, shot_numbers,
+                                  expected_len=None):
+	"""Read many shots of one channel into a ``(nshot, nsamples)`` float64 array.
+
+	This is the fast path for analysis code that scans many shots of the same
+	channel. The WAVEDESC scaling (gain/offset/dt/t0) is identical across a
+	channel's shots, so it is decoded **once** here -- avoiding the redundant
+	per-shot header read + decode that ``read_hdf5_scope_data`` would do if called
+	in a loop.
+
+	Each shot's int16 dataset is read and scaled to volts (``raw*gain - offset``,
+	float64, same as ``read_hdf5_scope_data``). A shot that is missing, marked
+	skipped, or -- when ``expected_len`` is given -- not of that length becomes a
+	row of ``NaN`` so the returned stack stays rectangular and row order matches
+	``shot_numbers``.
+
+	Parameters
+	----------
+	f : h5py.File
+		Open HDF5 file object (not a filename).
+	scope_name, channel_name : str
+		Scope group and channel (e.g. ``'lpscope'``, ``'C1'``).
+	shot_numbers : sequence of int
+		Shot numbers to read, in order.
+	expected_len : int, optional
+		If given, a shot whose sample count differs becomes a NaN row.
+
+	Returns
+	-------
+	tuple
+		``(stack, dt, t0)`` where ``stack`` is a ``(len(shot_numbers), nsamples)``
+		float64 array (NaN rows for unreadable shots), or ``None`` if no shot in
+		``shot_numbers`` could be read; ``dt``/``t0`` are the channel's sample
+		spacing and time offset (``None`` if ``stack`` is ``None``).
+	"""
+	shot_numbers = list(shot_numbers)
+
+	# Decode scaling once, from the first readable, non-skipped shot.
+	gain = offset = dt = t0 = None
+	for s in shot_numbers:
+		try:
+			shot_group = f[scope_name][f'shot_{s}']
+		except KeyError:
+			continue
+		if shot_group.attrs.get('skipped', False):
+			continue
+		if f'{channel_name}_data' not in shot_group:
+			continue
+		try:
+			gain, offset, dt, t0 = _scope_channel_scaling(f, scope_name, channel_name, s)
+		except (KeyError, ValueError):
+			continue
+		break
+	if gain is None:
+		return None, None, None
+
+	# Determine the row width: the realized expected_len, else the first shot's.
+	nsamples = expected_len
+
+	rows = []
+	for s in shot_numbers:
+		row = None
+		try:
+			shot_group = f[scope_name][f'shot_{s}']
+			if not shot_group.attrs.get('skipped', False):
+				raw = shot_group[f'{channel_name}_data'][:]
+				if nsamples is None:
+					nsamples = len(raw)
+				if len(raw) == nsamples:
+					row = raw.astype(np.float64) * gain - offset
+		except (KeyError, ValueError):
+			row = None
+		rows.append(row)
+
+	if nsamples is None:  # nothing readable after all
+		return None, None, None
+
+	nan_row = np.full(nsamples, np.nan, dtype=np.float64)
+	stack = np.vstack([r if r is not None else nan_row for r in rows])
+	return stack, dt, t0
 
 #======================================================================================
 
