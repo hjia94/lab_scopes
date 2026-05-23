@@ -1,6 +1,3 @@
-# TODO: sequence-mode acquisition is broken in the current driver; the
-# test_acquire_sequence_data_reads_once_and_preserves_segments test below
-# is commented out until acquire_sequence_data is fixed.
 import struct
 
 import numpy as np
@@ -26,7 +23,7 @@ class SyntheticLeCroyScope(LeCroyScope):
         return self._synthetic_trace_bytes, self._synthetic_trace_bytes[wavedesc_start:wavedesc_end]
 
 
-def _wavedesc_bytes(total_samples, comm_type=1, subarray_count=0, gain=0.25, offset=-1.5):
+def _wavedesc_bytes(total_samples, comm_type=1, subarray_count=0, gain=0.25, offset=-1.5, trigtime_array=0):
     wavedesc = LeCroyWavedesc()
     wavedesc.generate_test_data(NTimes=1)
     bytes_per_sample = 2 if comm_type == 1 else 1
@@ -36,16 +33,28 @@ def _wavedesc_bytes(total_samples, comm_type=1, subarray_count=0, gain=0.25, off
         subarray_count=subarray_count,
         vertical_gain=gain,
         vertical_offset=offset,
+        trigtime_array=trigtime_array,
     )
     return struct.pack(WAVEDESC_FMT, *list(wd))
 
 
-def _trace_bytes(samples, comm_type=1, subarray_count=0, gain=0.25, offset=-1.5):
+def _trace_bytes(samples, comm_type=1, subarray_count=0, gain=0.25, offset=-1.5, trigtime_array=0):
     dtype = "<i2" if comm_type == 1 else np.int8
     data = np.asarray(samples, dtype=dtype)
+    # A sequence response inserts the TRIGTIME array between the WAVEDESC and the
+    # wave data; emulate it with filler bytes so the data offset (ndx0) is exercised.
+    trigtime_bytes = b"\xAA" * trigtime_array
     return (
         TRACE_PREFIX
-        + _wavedesc_bytes(data.size, comm_type=comm_type, subarray_count=subarray_count, gain=gain, offset=offset)
+        + _wavedesc_bytes(
+            data.size,
+            comm_type=comm_type,
+            subarray_count=subarray_count,
+            gain=gain,
+            offset=offset,
+            trigtime_array=trigtime_array,
+        )
+        + trigtime_bytes
         + data.tobytes()
     )
 
@@ -83,32 +92,65 @@ def test_acquire_parses_byte_data_fallback():
     np.testing.assert_array_equal(data, samples)
 
 
-# TODO: re-enable when sequence-mode acquisition is fixed.
-# def test_acquire_sequence_data_reads_once_and_preserves_segments():
-#     segments = np.array(
-#         [
-#             [-4, -3, -2, -1],
-#             [10, 11, 12, 13],
-#             [100, 101, 102, 103],
-#         ],
-#         dtype="<i2",
-#     )
-#     gain = 0.5
-#     offset = 1.0
-#     trace_bytes = _trace_bytes(
-#         segments.reshape(-1),
-#         comm_type=1,
-#         subarray_count=segments.shape[0],
-#         gain=gain,
-#         offset=offset,
-#     )
-#     scope = SyntheticLeCroyScope(trace_bytes)
-#
-#     segment_data, wavedesc_bytes = scope.acquire_sequence_data("C1")
-#
-#     assert len(wavedesc_bytes) == WAVEDESC_SIZE
-#     assert scope.acquire_bytes_calls == [("C1", 0)]
-#     assert len(segment_data) == segments.shape[0]
-#     expected = segments.astype(np.float64) * gain - offset
-#     for actual, expected_segment in zip(segment_data, expected):
-#         np.testing.assert_allclose(actual, expected_segment)
+def test_acquire_sequence_data_reads_once_and_preserves_segments():
+    segments = np.array(
+        [
+            [-4, -3, -2, -1],
+            [10, 11, 12, 13],
+            [100, 101, 102, 103],
+        ],
+        dtype="<i2",
+    )
+    gain = 0.5
+    offset = 1.0
+    trace_bytes = _trace_bytes(
+        segments.reshape(-1),
+        comm_type=1,
+        subarray_count=segments.shape[0],
+        gain=gain,
+        offset=offset,
+    )
+    scope = SyntheticLeCroyScope(trace_bytes)
+
+    segment_data, wavedesc_bytes = scope.acquire_sequence_data("C1")
+
+    assert len(wavedesc_bytes) == WAVEDESC_SIZE
+    assert scope.acquire_bytes_calls == [("C1", 0)]
+    assert len(segment_data) == segments.shape[0]
+    expected = segments.astype(np.float64) * gain - offset
+    for actual, expected_segment in zip(segment_data, expected):
+        np.testing.assert_allclose(actual, expected_segment)
+
+
+def test_acquire_sequence_data_skips_trigtime_array_offset():
+    # A real sequence response carries a non-zero TRIGTIME array between the
+    # WAVEDESC and the wave data. ndx0 (from parse_wavedesc) must skip it; a
+    # regression that ignored trigtime_array would read the 0xAA filler instead.
+    segments = np.array(
+        [
+            [-4, -3, -2, -1],
+            [10, 11, 12, 13],
+            [100, 101, 102, 103],
+        ],
+        dtype="<i2",
+    )
+    gain = 0.5
+    offset = 1.0
+    trace_bytes = _trace_bytes(
+        segments.reshape(-1),
+        comm_type=1,
+        subarray_count=segments.shape[0],
+        gain=gain,
+        offset=offset,
+        trigtime_array=16,  # 2 segments worth of {double, double} would be 32; any even nonzero exercises ndx0
+    )
+    scope = SyntheticLeCroyScope(trace_bytes)
+
+    segment_data, wavedesc_bytes = scope.acquire_sequence_data("C1")
+
+    assert len(wavedesc_bytes) == WAVEDESC_SIZE
+    assert scope.acquire_bytes_calls == [("C1", 0)]
+    assert len(segment_data) == segments.shape[0]
+    expected = segments.astype(np.float64) * gain - offset
+    for actual, expected_segment in zip(segment_data, expected):
+        np.testing.assert_allclose(actual, expected_segment)

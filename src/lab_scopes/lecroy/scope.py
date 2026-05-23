@@ -3,11 +3,9 @@
 This is based on the LAPD_DAQ ``LeCroy_Scope.py`` driver surface, but the
 connection is a native VICP transport instead of VISA.
 
-TODO: Sequence-mode acquisition is broken in this version. The
-``acquire_sequence_data`` method and the sequence branches in
-``parse_wavedesc`` / ``time_array`` are commented out below until the
-segment read path is fixed. See also tests/test_lecroy_scope_acquire.py
-and tests/test_lecroy_scope_real.py for the corresponding disabled tests.
+Sequence-mode (segmented) acquisition lives under the ``=== SEQUENCE MODE ===``
+section near the bottom of ``LeCroyScope``; the stateless segment math is in
+``lab_scopes.lecroy.sequence``.
 """
 
 from __future__ import annotations
@@ -20,6 +18,8 @@ from typing import Tuple
 import numpy as np
 
 from lab_scopes.transports.lecroy_vicp import LeCroyVICPTransport
+
+from .sequence import segment_sample_count, split_segments
 
 from .constants import (
     EXPANDED_TRACE_NAMES,
@@ -324,14 +324,9 @@ class LeCroyScope:
     def parse_wavedesc(self, wd):
         if wd.comm_type not in [0, 1]:
             raise RuntimeError(f"**** wd.comm_type = {wd.comm_type}; expected value is either 0 or 1").with_traceback(sys.exc_info()[2])
-        # TODO: sequence-mode disabled — restore the is_sequence branch when fixed.
-        # is_sequence = wd.subarray_count > 1
-        # if is_sequence:
-        #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
-        #     if wd.comm_type == 1:
-        #         NSamples = int(NSamples / 2)
-        # else:
-        #     NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        # Real-time (single-segment) sample count. Sequence-mode callers compute
+        # the per-segment count via sequence.segment_sample_count() and reuse only
+        # ndx0 from here; see the SEQUENCE MODE section below.
         NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
         if NSamples == 0:
             raise RuntimeError("**** fail because NSamples = 0 (possible cause: trace has no data? scope not triggered?)").with_traceback(sys.exc_info()[2])
@@ -377,23 +372,30 @@ class LeCroyScope:
             return data
         return data.astype(np.float64, copy=False) * wd.vertical_gain - wd.vertical_offset
 
-    # TODO: sequence-mode acquisition is broken — re-enable once the per-segment
-    # :WAVEFORM? read path is fixed and matches LAPD_DAQ behavior.
-    # def acquire_sequence_data(self, trace):
-    #     _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
-    #     wd = self.translate_wavedesc_bytes(wavedesc_bytes)
-    #     if wd.subarray_count < 2:
-    #         raise RuntimeError("Sequence mode requires at least 2 segments.")
-    #     segment_data = []
-    #     for segment in range(1, wd.subarray_count + 1):
-    #         data, _ = self.acquire(trace, segment)
-    #         segment_data.append(data)
-    #     return segment_data, wavedesc_bytes
-    def acquire_sequence_data(self, trace):
-        raise NotImplementedError(
-            "acquire_sequence_data is disabled in this version; sequence-mode "
-            "acquisition does not work and is pending a fix."
-        )
+    # === SEQUENCE MODE ==================================================
+    # Segmented acquisition: one :WAVEFORM? with SN=0 returns every segment
+    # concatenated in DATA_ARRAY_1. The per-segment sample math lives in
+    # lab_scopes.lecroy.sequence; see that module's docstring for the manual
+    # references and the per-segment trigger-offset caveat.
+
+    def acquire_sequence_data(self, trace, raw=False):
+        """Acquire all sequence-mode segments for ``trace`` in a single read.
+
+        Returns ``(segment_data, wavedesc_bytes)`` where ``segment_data`` is a
+        list of per-segment arrays (each length = samples/segment). With the
+        default ``raw=False`` the samples are scaled to volts; ``raw=True``
+        returns the raw int16/int8 values (LAPD_DAQ stacks these as int16).
+        """
+        trace_bytes, wavedesc_bytes = self.acquire_bytes(trace, seg=0)  # SN=0 -> all segments
+        wd = self.translate_wavedesc_bytes(wavedesc_bytes)
+        self.wd = wd
+        total_samples, nsamples = segment_sample_count(wd)
+        _NSamples, ndx0 = self.parse_wavedesc(wd)  # reuse for the data offset only
+        data = self._parse_wave_array(trace_bytes, wd, total_samples, ndx0, raw=raw)
+        segment_data = split_segments(data, wd.subarray_count, nsamples)
+        return segment_data, wavedesc_bytes
+
+    # === end SEQUENCE MODE ==============================================
 
     def time_array(self, trace=None):
         if trace is None and hasattr(self, "wd"):
@@ -401,14 +403,12 @@ class LeCroyScope:
         else:
             _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
             wd = self.translate_wavedesc_bytes(wavedesc_bytes)
-        # TODO: sequence-mode disabled — restore the subarray_count > 1 branch when fixed.
-        # if wd.subarray_count > 1:
-        #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
-        #     if wd.comm_type == 1:
-        #         NSamples = int(NSamples / 2)
-        # else:
-        #     NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
-        NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
+        if wd.subarray_count > 1:
+            # Sequence mode: per-segment length (shared per-sample axis; see the
+            # per-segment trigger-offset caveat in lecroy.sequence).
+            _total, NSamples = segment_sample_count(wd)
+        else:
+            NSamples = wd.wave_array_1 if wd.comm_type == 0 else int(wd.wave_array_1 / 2)
         t0 = float(wd.horiz_offset)
         horiz_interval = float(wd.horiz_interval)
         return np.linspace(t0, t0 + NSamples * horiz_interval, NSamples, endpoint=False)
