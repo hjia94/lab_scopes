@@ -206,7 +206,7 @@ class LeCroyScope:
     def displayed_channels(self) -> Tuple[str, ...]:
         channels = ()
         self.scope.write("COMM_HEADER OFF")
-        for ch in ("C1", "C2", "C3", "C4"):
+        for ch in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"):
             if self.scope.query(ch + ":TRACE?")[0:2] == "ON":
                 channels += (ch,)
         return channels
