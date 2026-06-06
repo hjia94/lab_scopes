@@ -35,6 +35,13 @@ from .constants import (
 )
 
 
+# Byte offset of the WAVEDESC ``sweeps_per_acq`` (int32) field within a
+# :WAVEFORM? response: 15-byte VICP/command preamble + 148-byte offset into the
+# WAVEDESC. Used as a monotonic completed-sweep counter to detect a *fresh*
+# acquisition (after CLEAR_SWEEPS) rather than relying on the ambiguous STOP state.
+SWEEPS_PER_ACQ_OFFSET = 15 + 148
+
+
 class LeCroyNoDataError(RuntimeError):
     """Raised when a trace's :WAVEFORM? response carries no curve data.
 
@@ -278,17 +285,17 @@ class LeCroyScope:
         channel = self.validate_channel(channel)
         self.scope.write(channel + ":WAVEFORM?")
         trace_bytes = self.scope.read_raw()
-        initial_sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+        initial_sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
         self.set_trigger_mode("AUTO")
         self.scope.write("CLEAR_SWEEPS")
         time.sleep(0.25)
         self.set_trigger_mode("NORM")
-        sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+        sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
         clear_sweeps_timeout = time.time() + 10
         while time.time() < clear_sweeps_timeout and sweeps_per_acq > 1:
             self.scope.write(channel + ":WAVEFORM?")
             trace_bytes = self.scope.read_raw()
-            sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+            sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
             if sweeps_per_acq < initial_sweeps_per_acq or sweeps_per_acq == 1:
                 break
         self.scope.write("COMM_FORMAT DEF9,BYTE,BIN")
@@ -302,7 +309,7 @@ class LeCroyScope:
             time.sleep(sleep_interval)
             self.scope.write(channel + ":WAVEFORM?")
             trace_bytes = self.scope.read_raw()
-            sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+            sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
             gaaak = sweeps_per_acq
             if sweeps_per_acq >= NSweeps:
                 timed_out = False
@@ -311,7 +318,7 @@ class LeCroyScope:
         self.set_trigger_mode("STOP")
         self.scope.write(channel + ":WAVEFORM?")
         trace_bytes = self.scope.read_raw()
-        sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+        sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
         if gaaak > sweeps_per_acq:
             self.gaaak_count += 1
             return self.wait_for_sweeps(channel, NSweeps, timeout, sleep_interval)
@@ -433,9 +440,98 @@ class LeCroyScope:
             txt = self.scope.query("TRIG_MODE?")
             if txt[0:3] == trigger_mode[0:3]:
                 break
+            # Fast-trigger case: when arming SINGLE against a free-running timer,
+            # an edge can arrive and the sweep complete before we read back
+            # "SIN", so the scope already reports "STOP". That is a successful
+            # arm-then-immediate-capture, not a failed arm -- accept it instead
+            # of burning all 25 retries waiting for a "SIN" that is already gone.
+            if trigger_mode == "SINGLE" and txt[0:3] == "STO":
+                break
             print("set_trigger_mode(", trigger_mode, ")    attempt", i, ":  TRIG_MODE is", txt)
             time.sleep(0.1)
         return prev_trigger_mode
+
+    def clear_sweeps(self) -> None:
+        """Reset the scope's sweep/acquisition counter.
+
+        After this, ``sweeps_per_acq`` reads as the count of acquisitions
+        completed *since the clear*, so the next completed sweep is detectable
+        as a fresh capture rather than a leftover STOP from a previous shot.
+        """
+        self.scope.write("CLEAR_SWEEPS")
+
+    def _read_sweeps_per_acq(self, channel) -> int:
+        """Read the sweep counter, assuming WAVEFORM_SETUP is already minimal.
+
+        Hot-path helper: skips the WAVEFORM_SETUP write so a tight poll loop
+        (wait_for_single_complete) issues one write + one read per iteration
+        instead of two writes. The counter lives in the fixed 346-byte WAVEDESC
+        header, returned in full regardless of the data-point count.
+        """
+        self.scope.write(channel + ":WAVEFORM?")
+        trace_bytes = self.scope.read_raw()
+        return struct.unpack(
+            "=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4]
+        )[0]
+
+    def sweeps_per_acq(self, channel) -> int:
+        """Return the completed-sweep counter from the channel's WAVEDESC.
+
+        This is a monotonic count (within a shot, after ``clear_sweeps``) of how
+        many acquisitions the scope has completed. It distinguishes a freshly
+        captured trigger (counter advanced) from an ambiguous STOP state, which
+        the scope reports both before any trigger and after a previous one.
+
+        The counter lives in the fixed 346-byte WAVEDESC header, which is always
+        returned in full, so we request a single data point (NP,1) to keep this
+        read cheap -- otherwise it would download the whole waveform.
+        """
+        channel = self.validate_channel(channel)
+        self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
+        return self._read_sweeps_per_acq(channel)
+
+    def arm_single(self, channel=None) -> str:
+        """Arm the scope for a single trigger and return the reference channel.
+
+        Clears the sweep counter first so a subsequent ``wait_for_single_complete``
+        on the returned channel sees an unambiguous 0 -> >=1 transition when a
+        fresh trigger lands. The reference channel is ``channel`` if given, else
+        the first displayed channel.
+        """
+        if channel is None:
+            channels = self.displayed_channels()
+            if not channels:
+                raise RuntimeError(
+                    "**** arm_single(): no displayed channels to poll"
+                ).with_traceback(sys.exc_info()[2])
+            channel = channels[0]
+        else:
+            channel = self.validate_channel(channel)
+        self.clear_sweeps()
+        self.set_trigger_mode("SINGLE")
+        return channel
+
+    def wait_for_single_complete(self, channel, timeout=100, poll=0.02) -> bool:
+        """Block until a fresh single acquisition has completed.
+
+        Uses the sweep counter as the source of truth: returns ``True`` as soon
+        as the counter is >= 1 (a fresh sweep landed after the ``clear_sweeps``
+        done in ``arm_single``). Because the counter was cleared at arm time, a
+        leftover STOP from a previous shot reads as 0 and cannot be mistaken for
+        a new acquisition. Returns ``False`` on timeout.
+
+        WAVEFORM_SETUP is made minimal once up front, then each poll issues a
+        single :WAVEFORM? read, so a tight wait does not re-send the setup or
+        download full waveforms.
+        """
+        channel = self.validate_channel(channel)
+        self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._read_sweeps_per_acq(channel) >= 1:
+                return True
+            time.sleep(poll)
+        return False
 
     def expanded_name(self, tr) -> str:
         return EXPANDED_TRACE_NAMES.get(tr, "unknown_trace_name")
