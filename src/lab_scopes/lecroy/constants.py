@@ -11,6 +11,7 @@ from .wavedesc import (
     WAVEDESC,
     WAVEDESC_FMT,
     WAVEDESC_SIZE,
+    wavedesc_trigger_timestamp,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "WAVEDESC",
     "WAVEDESC_FMT",
     "WAVEDESC_SIZE",
+    "wavedesc_trigger_timestamp",
 ]
