@@ -48,7 +48,7 @@ WAVEDESC_SIZE = 346
    timebase: see below
    fixed_vert_gain: see below
    vert_coupling: see below
-   wave_source:  0=CH1, 1=CH2, 2=CH3, 3=CH4, ... 7=CH8, 9=Unknown
+   wave_source:  0=CH1, 1=CH2, 2=CH3, 3=CH4, 9=Unknown
 """
 WAVEDESC_FMT = '=16s16shhllllllllll16sl16shhlllllllllhhffffhhfdd48s48sfdBBBBhhfhhhhhhfhhffh'    # for struct...
 #    The initial '=' character specifies native byte order, with standard (C) alignment
@@ -77,8 +77,7 @@ EXPANDED_TRACE_NAMES = {'F1': 'Math1'   , 'F2': 'Math2'   , 'F3': 'Math3'   , 'F
                         'F5': 'Math5'   , 'F6': 'Math6'   , 'F7': 'Math7'   , 'F8': 'Math8'   ,
 					  'TA': 'ChannelA', 'TB': 'ChannelB', 'TC': 'ChannelC', 'TD': 'ChannelD',
 					  'M1': 'Memory1' , 'M2': 'Memory2' , 'M3': 'Memory3' , 'M4': 'Memory4' ,
-					  'C1': 'Channel1', 'C2': 'Channel2', 'C3': 'Channel3', 'C4': 'Channel4',
-					  'C5': 'Channel5', 'C6': 'Channel6', 'C7': 'Channel7', 'C8': 'Channel8' }
+					  'C1': 'Channel1', 'C2': 'Channel2', 'C3': 'Channel3', 'C4': 'Channel4' }
 KNOWN_TRACE_NAMES = sorted(list(EXPANDED_TRACE_NAMES.keys()))
 
 

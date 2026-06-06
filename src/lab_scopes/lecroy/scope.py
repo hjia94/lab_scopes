@@ -191,14 +191,14 @@ class LeCroyScope:
             self.scope.write('MESSAGE "' + msg + '"')
 
     def validate_channel(self, Cn) -> str:
-        if type(Cn) == str and Cn in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"):
+        if type(Cn) == str and Cn in ("C1", "C2", "C3", "C4"):
             return Cn
-        if type(Cn) == int and 1 <= Cn <= 8:
+        if type(Cn) == int and 1 <= Cn <= 4:
             return "C" + str(Cn)
-        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-8').with_traceback(sys.exc_info()[2])
+        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-4').with_traceback(sys.exc_info()[2])
 
     def validate_trace(self, tr) -> str:
-        if type(tr) == int and 1 <= tr <= 8:
+        if type(tr) == int and 1 <= tr <= 4:
             return "C" + str(tr)
         for trn in self.valid_trace_names:
             if tr == trn:
@@ -213,7 +213,7 @@ class LeCroyScope:
     def displayed_channels(self) -> Tuple[str, ...]:
         channels = ()
         self.scope.write("COMM_HEADER OFF")
-        for ch in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"):
+        for ch in ("C1", "C2", "C3", "C4"):
             if self.scope.query(ch + ":TRACE?")[0:2] == "ON":
                 channels += (ch,)
         return channels

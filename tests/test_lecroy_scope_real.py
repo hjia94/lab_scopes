@@ -191,7 +191,7 @@ def test_displayed_channels_subset_of_valid(scope):
     assert isinstance(chans, tuple)
     assert isinstance(traces, tuple)
     for c in chans:
-        assert c in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+        assert c in ("C1", "C2", "C3", "C4")
     for t in traces:
         assert t in scope.valid_trace_names
     if len(traces) < 2:
