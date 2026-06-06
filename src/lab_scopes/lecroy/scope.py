@@ -432,7 +432,7 @@ class LeCroyScope:
     def get_sequence_trigger_times(self):
         raise RuntimeError("get_sequence_trigger_times is experimental and not implemented in lab_scopes yet.")
 
-    def set_trigger_mode(self, trigger_mode, accept_stop_as_armed=True) -> str:
+    def set_trigger_mode(self, trigger_mode) -> str:
         self.scope.write("COMM_HEADER OFF")
         prev_trigger_mode = self.scope.query("TRIG_MODE?")
         if trigger_mode == "AUTO":
@@ -454,12 +454,9 @@ class LeCroyScope:
             # "SIN", so the scope already reports "STOP". That is a successful
             # arm-then-immediate-capture, not a failed arm -- accept it instead
             # of burning all 25 retries waiting for a "SIN" that is already gone.
-            #
-            # The master scope passes accept_stop_as_armed=False: it must reach a
-            # real "SIN" so it does not silently fire (driving the slaves' EXT)
-            # before the caller has confirmed every slave is armed and ready.
-            if (accept_stop_as_armed and trigger_mode == "SINGLE"
-                    and txt[0:3] == "STO"):
+            # (The master path, arm_master_single, makes its own strict SIN check
+            # afterward, so it does not depend on this shortcut.)
+            if trigger_mode == "SINGLE" and txt[0:3] == "STO":
                 break
             print("set_trigger_mode(", trigger_mode, ")    attempt", i, ":  TRIG_MODE is", txt)
             time.sleep(0.1)
@@ -504,6 +501,21 @@ class LeCroyScope:
         self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
         return self._read_sweeps_per_acq(channel)
 
+    def _resolve_ref_channel(self, channel=None) -> str:
+        """Return the reference channel to poll: ``channel`` or the first displayed.
+
+        Shared by the arm helpers so the channel-discovery fallback (a scan of
+        C1..C4 :TRACE? queries) lives in one place.
+        """
+        if channel is None:
+            channels = self.displayed_channels()
+            if not channels:
+                raise RuntimeError(
+                    "**** no displayed channels to poll"
+                ).with_traceback(sys.exc_info()[2])
+            return channels[0]
+        return self.validate_channel(channel)
+
     def arm_single(self, channel=None) -> str:
         """Arm the scope for a single trigger and return the reference channel.
 
@@ -512,15 +524,7 @@ class LeCroyScope:
         fresh trigger lands. The reference channel is ``channel`` if given, else
         the first displayed channel.
         """
-        if channel is None:
-            channels = self.displayed_channels()
-            if not channels:
-                raise RuntimeError(
-                    "**** arm_single(): no displayed channels to poll"
-                ).with_traceback(sys.exc_info()[2])
-            channel = channels[0]
-        else:
-            channel = self.validate_channel(channel)
+        channel = self._resolve_ref_channel(channel)
         self.clear_sweeps()
         self.set_trigger_mode("SINGLE")
         return channel
@@ -528,13 +532,16 @@ class LeCroyScope:
     def read_inr(self) -> int:
         """Return the LeCroy INR (Internal state change Register) as an int.
 
-        COMM_HEADER is OFF for this driver, so ``INR?`` returns a bare integer.
         Returns 0 on a non-integer/blank response rather than raising, so a
         transient communication blip cannot abort a run. Note INR is
         read-to-clear: each read returns the bits set *since the last read*.
+
+        The last whitespace-separated token is parsed, so this is robust whether
+        COMM_HEADER is OFF (bare ``8192``) or ON (``INR 8192``).
         """
         resp = self.scope.query("INR?")
-        return _vbs_int(resp, 0)
+        token = resp.split()[-1] if isinstance(resp, str) and resp.split() else resp
+        return _vbs_int(token, 0)
 
     def wait_for_trigger_ready(self, timeout=5.0, poll=0.01) -> bool:
         """Block until the scope reports its trigger is armed and waiting.
@@ -569,32 +576,29 @@ class LeCroyScope:
         ready = self.wait_for_trigger_ready(timeout=ready_timeout)
         return channel, ready
 
-    def arm_master_single(self, channel=None, retries=3) -> str:
-        """Arm the master scope for a single trigger, requiring a real SIN.
+    def arm_master_single(self, channel=None) -> str:
+        """Arm the master scope for a single trigger (exactly once).
 
-        Unlike ``arm_single``, this does NOT accept an instant STOP as "armed"
-        (``set_trigger_mode(..., accept_stop_as_armed=False)``): the master's
-        trigger-out drives the slaves, so it must not silently fire before the
-        caller has confirmed the slaves are ready. If the master fires before we
-        confirm SIN (possible only at very high edge rates), it is re-cleared and
-        re-armed up to ``retries`` times; after that it proceeds best-effort (the
-        per-shot sweep-counter completion check still guarantees fresh data).
-        Returns the reference channel.
+        The master is armed with a single ``CLEAR_SWEEPS`` + ``TRIG_MODE SINGLE``
+        and is NOT re-armed if it does not read back ``SIN``. Re-arming would
+        re-pulse the master's trigger-out, which drives the slaves' EXT input, and
+        a stray pulse around the shot boundary can double-trigger a slave (the
+        slave's front panel shows SINGLE twice). Arming once removes that cause;
+        correctness for the shot is still guaranteed by the per-shot completion
+        check (sweep counter; see ``wait_for_single_complete`` /
+        ``wait_for_stop_then_complete``).
+
+        If the master reads ``STOP`` instead of ``SIN`` (it fired before we could
+        read back, possible only when edges arrive faster than a round-trip), a
+        warning is printed but the shot proceeds best-effort. Returns the
+        reference channel.
         """
-        if channel is None:
-            channels = self.displayed_channels()
-            if not channels:
-                raise RuntimeError(
-                    "**** arm_master_single(): no displayed channels to poll"
-                ).with_traceback(sys.exc_info()[2])
-            channel = channels[0]
-        else:
-            channel = self.validate_channel(channel)
-        for _ in range(max(1, retries)):
-            self.clear_sweeps()
-            self.set_trigger_mode("SINGLE", accept_stop_as_armed=False)
-            if self.scope.query("TRIG_MODE?")[0:3] == "SIN":
-                break
+        channel = self._resolve_ref_channel(channel)
+        self.clear_sweeps()
+        self.set_trigger_mode("SINGLE")
+        if self.scope.query("TRIG_MODE?")[0:3] != "SIN":
+            print("**** arm_master_single(): master did not hold SIN after arming "
+                  "(it may have fired before readback); proceeding best-effort.")
         return channel
 
     def wait_for_single_complete(self, channel, timeout=100, poll=0.02) -> bool:
@@ -616,6 +620,32 @@ class LeCroyScope:
         while time.time() < deadline:
             if self._read_sweeps_per_acq(channel) >= 1:
                 return True
+            time.sleep(poll)
+        return False
+
+    def wait_for_stop_then_complete(self, channel, timeout=100, poll=0.02) -> bool:
+        """Block until the scope is STOPped AND a fresh sweep is confirmed.
+
+        Two-stage completion check: first wait for ``TRIG_MODE?`` to read ``STOP``
+        (a cheap, fast hint that the single acquisition has ended), then confirm
+        via the sweep counter that a fresh sweep actually landed this shot
+        (``sweeps_per_acq`` >= 1 after the arm-time ``clear_sweeps``). The counter
+        is the source of truth -- STOP alone is ambiguous (the scope reads STOP
+        both before any trigger and after a previous one), so a leftover STOP from
+        a prior shot, which reads counter 0, is never mistaken for fresh data.
+
+        Returns True once both hold, False on timeout. WAVEFORM_SETUP is made
+        minimal once up front so the counter reads stay cheap.
+        """
+        channel = self.validate_channel(channel)
+        self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Stage 1: STOP hint (cheap TRIG_MODE? read).
+            if self.scope.query("TRIG_MODE?")[0:3] == "STO":
+                # Stage 2: confirm a fresh sweep actually landed (authoritative).
+                if self._read_sweeps_per_acq(channel) >= 1:
+                    return True
             time.sleep(poll)
         return False
 

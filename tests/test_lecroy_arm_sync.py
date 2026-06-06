@@ -4,8 +4,7 @@ Covers the INR trigger-ready primitives and the master/slave arm helpers added
 to LeCroyScope:
   * read_inr / wait_for_trigger_ready (INR status-register polling),
   * arm_single_and_confirm (slave: arm + confirm ready),
-  * arm_master_single (master: arm with a strict SIN check, reject instant STOP),
-  * set_trigger_mode's accept_stop_as_armed flag.
+  * arm_master_single (master: arm with a strict SIN check, retry on STOP).
 
 A FakeTransport stands in for LeCroyVICPTransport: it records writes and answers
 queries from a scripted/programmable map, so we can model a scope that is/ isn't
@@ -142,12 +141,12 @@ def test_arm_master_single_accepts_real_sin():
     assert "TRIG_MODE SINGLE" in t.writes
 
 
-def test_arm_master_single_retries_then_proceeds_on_persistent_stop():
-    # Master always reads STOP (fired before we confirmed). arm_master_single
-    # must NOT hang forever -- it retries `retries` times then returns.
+def test_arm_master_single_arms_exactly_once():
+    # The master must be armed exactly once -- re-arming would re-pulse its
+    # trigger-out and can double-trigger the slaves. Even when it never reads
+    # back SIN, there must be only ONE CLEAR_SWEEPS + ONE TRIG_MODE SINGLE.
     t = FakeTransport()
 
-    # Always answer STOP to TRIG_MODE? (both the verify loop and the SIN check).
     def query(cmd):
         if cmd == "TRIG_MODE?":
             return "STOP"
@@ -155,16 +154,41 @@ def test_arm_master_single_retries_then_proceeds_on_persistent_stop():
 
     t.query = query
     scope = _make_scope(t)
-    channel = scope.arm_master_single(channel="C1", retries=2)
+    channel = scope.arm_master_single(channel="C1")
     assert channel == "C1"
-    # Re-armed (CLEAR_SWEEPS + TRIG_MODE SINGLE) once per retry.
-    assert t.writes.count("CLEAR_SWEEPS") == 2
-    assert t.writes.count("TRIG_MODE SINGLE") == 2
+    assert t.writes.count("CLEAR_SWEEPS") == 1
+    assert t.writes.count("TRIG_MODE SINGLE") == 1
 
 
-def test_set_trigger_mode_master_rejects_stop_shortcut():
-    # With accept_stop_as_armed=False, an instant STOP is NOT treated as armed,
-    # so the verify loop keeps polling (does not break early on STOP).
+def test_arm_master_single_warns_when_not_sin(capsys):
+    # If the master does not hold SIN after arming, a warning is printed but the
+    # call still returns (best-effort), without re-arming.
+    t = FakeTransport()
+
+    def query(cmd):
+        if cmd == "TRIG_MODE?":
+            return "STOP"
+        return FakeTransport.query(t, cmd)
+
+    t.query = query
+    scope = _make_scope(t)
+    scope.arm_master_single(channel="C1")
+    out = capsys.readouterr().out
+    assert "did not hold SIN" in out
+
+
+def test_arm_master_single_no_warning_when_sin(capsys):
+    t = FakeTransport()
+    t.trig_mode_answers = ["SINGLE"]
+    scope = _make_scope(t)
+    scope.arm_master_single(channel="C1")
+    out = capsys.readouterr().out
+    assert "did not hold SIN" not in out
+
+
+def test_set_trigger_mode_accepts_stop_shortcut():
+    # An instant STOP after arming SINGLE is treated as armed-then-fired, so the
+    # verify loop breaks immediately instead of spinning all 25 retries.
     t = FakeTransport()
     calls = {"n": 0}
 
@@ -176,23 +200,43 @@ def test_set_trigger_mode_master_rejects_stop_shortcut():
 
     t.query = query
     scope = _make_scope(t)
-    scope.set_trigger_mode("SINGLE", accept_stop_as_armed=False)
-    # 1 prev-mode read + 25 verify polls that never accept STOP.
-    assert calls["n"] >= 25
-
-
-def test_set_trigger_mode_default_accepts_stop_shortcut():
-    t = FakeTransport()
-    calls = {"n": 0}
-
-    def query(cmd):
-        if cmd == "TRIG_MODE?":
-            calls["n"] += 1
-            return "STOP"
-        return FakeTransport.query(t, cmd)
-
-    t.query = query
-    scope = _make_scope(t)
-    scope.set_trigger_mode("SINGLE")  # default accept_stop_as_armed=True
+    scope.set_trigger_mode("SINGLE")
     # prev-mode read (1) + first verify poll sees STOP and breaks (1) = 2.
     assert calls["n"] == 2
+
+
+def test_wait_for_stop_then_complete_requires_both_stop_and_counter():
+    # Stage 1 = TRIG_MODE STOP hint; stage 2 = sweep counter >= 1. Both must hold.
+    t = FakeTransport()
+    scope = _make_scope(t)
+
+    state = {"trig": "SINGLE", "sweeps": 0}
+    t.query = lambda cmd: state["trig"] if cmd == "TRIG_MODE?" else ""
+    scope._read_sweeps_per_acq = lambda ch: state["sweeps"]
+
+    # Not stopped yet -> times out quickly.
+    assert scope.wait_for_stop_then_complete("C1", timeout=0.1, poll=0.01) is False
+
+    # Stopped but counter still 0 (leftover/stale STOP) -> still not complete.
+    state["trig"] = "STOP"
+    assert scope.wait_for_stop_then_complete("C1", timeout=0.1, poll=0.01) is False
+
+    # Stopped AND a fresh sweep landed -> complete.
+    state["sweeps"] = 1
+    assert scope.wait_for_stop_then_complete("C1", timeout=0.5, poll=0.01) is True
+
+
+def test_wait_for_stop_then_complete_waits_for_stop_before_confirming():
+    # The counter must only be trusted once the scope is STOPped: a counter that
+    # reads >=1 while still SINGLE must NOT be reported complete.
+    t = FakeTransport()
+    scope = _make_scope(t)
+
+    state = {"trig": "SINGLE"}
+    t.query = lambda cmd: state["trig"] if cmd == "TRIG_MODE?" else ""
+    # Counter already 1, but we are still armed (SINGLE) -> not complete.
+    scope._read_sweeps_per_acq = lambda ch: 1
+
+    assert scope.wait_for_stop_then_complete("C1", timeout=0.1, poll=0.01) is False
+    state["trig"] = "STOP"
+    assert scope.wait_for_stop_then_complete("C1", timeout=0.5, poll=0.01) is True
