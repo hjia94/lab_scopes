@@ -42,6 +42,15 @@ from .constants import (
 SWEEPS_PER_ACQ_OFFSET = 15 + 148
 
 
+# Bit in the LeCroy X-Stream INR (Internal state change Register, read via
+# "INR?") that means "trigger is ready / waiting for a trigger". Unlike
+# "TRIG_MODE?" -- which reports the configured mode and flips to SIN before the
+# trigger subsystem has finished re-arming -- this bit reflects the trigger
+# engine actually being armed and listening, so it is the race-free signal that a
+# scope (e.g. a slave) is ready to capture an edge. INR is read-to-clear.
+INR_TRIGGER_READY = 0x2000
+
+
 class LeCroyNoDataError(RuntimeError):
     """Raised when a trace's :WAVEFORM? response carries no curve data.
 
@@ -423,7 +432,7 @@ class LeCroyScope:
     def get_sequence_trigger_times(self):
         raise RuntimeError("get_sequence_trigger_times is experimental and not implemented in lab_scopes yet.")
 
-    def set_trigger_mode(self, trigger_mode) -> str:
+    def set_trigger_mode(self, trigger_mode, accept_stop_as_armed=True) -> str:
         self.scope.write("COMM_HEADER OFF")
         prev_trigger_mode = self.scope.query("TRIG_MODE?")
         if trigger_mode == "AUTO":
@@ -445,7 +454,12 @@ class LeCroyScope:
             # "SIN", so the scope already reports "STOP". That is a successful
             # arm-then-immediate-capture, not a failed arm -- accept it instead
             # of burning all 25 retries waiting for a "SIN" that is already gone.
-            if trigger_mode == "SINGLE" and txt[0:3] == "STO":
+            #
+            # The master scope passes accept_stop_as_armed=False: it must reach a
+            # real "SIN" so it does not silently fire (driving the slaves' EXT)
+            # before the caller has confirmed every slave is armed and ready.
+            if (accept_stop_as_armed and trigger_mode == "SINGLE"
+                    and txt[0:3] == "STO"):
                 break
             print("set_trigger_mode(", trigger_mode, ")    attempt", i, ":  TRIG_MODE is", txt)
             time.sleep(0.1)
@@ -509,6 +523,78 @@ class LeCroyScope:
             channel = self.validate_channel(channel)
         self.clear_sweeps()
         self.set_trigger_mode("SINGLE")
+        return channel
+
+    def read_inr(self) -> int:
+        """Return the LeCroy INR (Internal state change Register) as an int.
+
+        COMM_HEADER is OFF for this driver, so ``INR?`` returns a bare integer.
+        Returns 0 on a non-integer/blank response rather than raising, so a
+        transient communication blip cannot abort a run. Note INR is
+        read-to-clear: each read returns the bits set *since the last read*.
+        """
+        resp = self.scope.query("INR?")
+        return _vbs_int(resp, 0)
+
+    def wait_for_trigger_ready(self, timeout=5.0, poll=0.01) -> bool:
+        """Block until the scope reports its trigger is armed and waiting.
+
+        Polls the INR register for the ``INR_TRIGGER_READY`` bit and returns True
+        as soon as it is seen, or False on timeout. Because INR is read-to-clear,
+        the bit is OR-accumulated across reads within the wait so a set-then-clear
+        transition between two polls is not lost.
+
+        Used to confirm a slave scope is actually listening on its EXT input
+        before the master is armed -- the master's trigger-out drives the slaves,
+        so a slave that is not yet ready would miss the master's edge and desync.
+        """
+        seen = 0
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            seen |= self.read_inr()
+            if seen & INR_TRIGGER_READY:
+                return True
+            time.sleep(poll)
+        return False
+
+    def arm_single_and_confirm(self, channel=None, ready_timeout=5.0):
+        """Arm for a single trigger and confirm the hardware is trigger-ready.
+
+        Returns ``(channel, ready)`` where ``channel`` is the reference channel
+        (as from ``arm_single``) and ``ready`` is True iff the INR trigger-ready
+        bit was observed within ``ready_timeout``. Slaves use this so the caller
+        can withhold arming the master until every slave is confirmed ready.
+        """
+        channel = self.arm_single(channel=channel)
+        ready = self.wait_for_trigger_ready(timeout=ready_timeout)
+        return channel, ready
+
+    def arm_master_single(self, channel=None, retries=3) -> str:
+        """Arm the master scope for a single trigger, requiring a real SIN.
+
+        Unlike ``arm_single``, this does NOT accept an instant STOP as "armed"
+        (``set_trigger_mode(..., accept_stop_as_armed=False)``): the master's
+        trigger-out drives the slaves, so it must not silently fire before the
+        caller has confirmed the slaves are ready. If the master fires before we
+        confirm SIN (possible only at very high edge rates), it is re-cleared and
+        re-armed up to ``retries`` times; after that it proceeds best-effort (the
+        per-shot sweep-counter completion check still guarantees fresh data).
+        Returns the reference channel.
+        """
+        if channel is None:
+            channels = self.displayed_channels()
+            if not channels:
+                raise RuntimeError(
+                    "**** arm_master_single(): no displayed channels to poll"
+                ).with_traceback(sys.exc_info()[2])
+            channel = channels[0]
+        else:
+            channel = self.validate_channel(channel)
+        for _ in range(max(1, retries)):
+            self.clear_sweeps()
+            self.set_trigger_mode("SINGLE", accept_stop_as_armed=False)
+            if self.scope.query("TRIG_MODE?")[0:3] == "SIN":
+                break
         return channel
 
     def wait_for_single_complete(self, channel, timeout=100, poll=0.02) -> bool:
