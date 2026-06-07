@@ -277,19 +277,17 @@ class LeCroyScope:
             self.scope.write('MESSAGE "' + msg + '"')
 
     def validate_channel(self, Cn) -> str:
-        # Bound by the detected channel count (4 or 8). Fall back to 4 when
-        # n_channels is unset -- e.g. a test fake built via __new__ that skips
-        # __init__ -- preserving the historical C1-C4 contract in that case.
-        n = getattr(self, "n_channels", 4)
-        if type(Cn) == str and Cn in tuple(f"C{i}" for i in range(1, n + 1)):
+        # Bound by the detected channel count (4 or 8). channel_names and
+        # n_channels have class-level 4-channel defaults, so this works even on a
+        # test fake built via __new__ that skips __init__.
+        if type(Cn) == str and Cn in self.channel_names:
             return Cn
-        if type(Cn) == int and 1 <= Cn <= n:
+        if type(Cn) == int and 1 <= Cn <= self.n_channels:
             return "C" + str(Cn)
-        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-{n}').with_traceback(sys.exc_info()[2])
+        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-{self.n_channels}').with_traceback(sys.exc_info()[2])
 
     def validate_trace(self, tr) -> str:
-        n = getattr(self, "n_channels", 4)
-        if type(tr) == int and 1 <= tr <= n:
+        if type(tr) == int and 1 <= tr <= self.n_channels:
             return "C" + str(tr)
         for trn in self.valid_trace_names:
             if tr == trn:
@@ -590,7 +588,7 @@ class LeCroyScope:
         """Return the reference channel to poll: ``channel`` or the first displayed.
 
         Shared by the arm helpers so the channel-discovery fallback (a scan of
-        C1..C4 :TRACE? queries) lives in one place.
+        the detected input channels via :TRACE? queries) lives in one place.
         """
         if channel is None:
             channels = self.displayed_channels()
