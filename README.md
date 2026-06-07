@@ -7,6 +7,28 @@ Rigol DHO800/DHO900 communication uses plain TCP/SCPI.
 
 LeCroy `.trc` readers work offline.
 
+## What's new in 0.3.0
+
+- **8-channel LeCroy support.** The driver detects the analog input count (4 or
+  8) at connect time — a zero-round-trip `*IDN?` model match, falling back to a
+  single `C5` probe for unrecognized models — and bounds channel/trace
+  validation and displayed-channel scans to the channels that actually exist, so
+  it never stalls probing C5–C8 on a 4-channel scope. `channel_names` /
+  `n_channels` expose the detected layout.
+- **Master/slave synchronized acquisition.** New arming primitives let a caller
+  arm every slave first, confirm each is genuinely trigger-ready via the INR
+  status register (`arm_single_and_confirm` / `wait_for_trigger_ready`), then arm
+  the master last exactly once (`arm_master_single`) — so the master's
+  trigger-out can't fire before a slave is listening. Per-shot completion is
+  verified by the WAVEDESC sweep counter (`wait_for_stop_then_complete`), which
+  distinguishes a fresh capture from a leftover STOP.
+- The master arm no longer emits a spurious per-shot warning when it arms and
+  fires before the trigger-mode read-back (a healthy `STOP` against a fast
+  free-running timer); it warns only on a genuinely unexpected mode.
+
+**Known limitation:** sequence/segment acquisition is still disabled (see
+below); use single-shot acquisition.
+
 ## What's new in 0.2.0
 
 - Faster LeCroy waveform acquisition (optimized VICP transfer path, single-fetch raw↔scaled cross-check).
@@ -64,11 +86,13 @@ pip install "git+https://github.com/hjia94/lab_scopes.git" pytest
 
 The file [tests/test_lecroy_scope_real.py](tests/test_lecroy_scope_real.py)
 exercises ~20 areas of the `LeCroyScope` driver against a live instrument:
-connection and `*IDN?`, channel/trace validation, displayed-channel
-discovery, `max_samples`, vertical scale, averaging, raw and scaled
-acquisition with a single-fetch raw↔scaled cross-check, header parsing,
-`time_array`, sequence mode (auto-skipped if not active), and status
-messages.
+connection and `*IDN?`, channel-count detection, channel/trace validation,
+displayed-channel discovery, `max_samples`, vertical scale, averaging, raw and
+scaled acquisition with a single-fetch raw↔scaled cross-check, header parsing,
+`time_array`, sequence mode (auto-skipped if not active), and status messages.
+The master/slave arming and sweep-counter completion primitives are covered by
+the offline [tests/test_lecroy_arm_sync.py](tests/test_lecroy_arm_sync.py)
+suite (no hardware required).
 
 The suite has two mutually exclusive modes selected by the
 `MUTATING` flag:
