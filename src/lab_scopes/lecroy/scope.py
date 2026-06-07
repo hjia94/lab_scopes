@@ -19,6 +19,7 @@ from typing import Tuple
 
 import numpy as np
 
+from lab_scopes.errors import ScopeConnectionError
 from lab_scopes.transports.lecroy_vicp import LeCroyVICPTransport
 
 from .constants import (
@@ -169,25 +170,34 @@ class LeCroyScope:
            with zero extra round-trips.
         2. Fallback -- for an unrecognized model, do a single ``C5:TRACE?`` +
            ``CMR?`` probe. ``CMR? == 0`` means the scope accepted C5, so it has 8
-           channels; any error means 4. This costs one round-trip pair, far
-           cheaper than the multi-second hang of blindly probing C5-C8.
+           channels; a non-zero/non-numeric ``CMR?`` (or a read timeout, which a
+           4-channel scope may return for an invalid channel) means 4. This costs
+           one round-trip pair, far cheaper than the multi-second hang of blindly
+           probing C5-C8.
 
-        Defaults to 4 on any failure -- the safe lower bound (a 4-channel set is
-        valid on every supported scope), so a transient comms blip never invents
-        channels that do not exist.
+        Defaults to 4 -- the safe lower bound (a 4-channel set is valid on every
+        supported scope), so an ambiguous reply never invents channels that do
+        not exist. A genuine connection drop (``ScopeConnectionError``) is *not*
+        swallowed: silently returning 4 would mask a dead link as a quiet
+        mis-detection, so it propagates and fails init loudly.
         """
         idn_upper = (self.idn_string or "").upper()
         if any(marker in idn_upper for marker in LECROY_8CH_MODEL_MARKERS):
             if self.verbose:
                 print("<:> detected 8-channel scope from *IDN?")
             return 8
-        # Unrecognized model: probe the 4-vs-8 boundary with one C5 query.
+        # Unrecognized model: probe the 4-vs-8 boundary with one C5 query. A read
+        # timeout / non-numeric CMR? is ambiguous -> treat as 4 (handled by the
+        # broad except + _vbs_int default); a connection drop is fatal and is
+        # re-raised before that.
         try:
             self.scope.query("C5:TRACE?")
-            if int(self.scope.query("CMR?")) == 0:
+            if _vbs_int(self.scope.query("CMR?"), default=-1) == 0:
                 if self.verbose:
                     print("<:> detected 8-channel scope from C5 probe")
                 return 8
+        except ScopeConnectionError:
+            raise
         except Exception:
             pass
         return 4
@@ -299,24 +309,36 @@ class LeCroyScope:
             self.scope.write('VBS "app.Acquisition.Horizontal.MaxSamples=' + str(N) + '"')
         return _vbs_int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'), 0)
 
-    def displayed_channels(self) -> Tuple[str, ...]:
-        channels = ()
+    def _scan_displayed(self, names) -> Tuple[str, ...]:
+        """Return the subset of ``names`` whose :TRACE? reports ``ON``.
+
+        A garbled or timed-out reply for one name is skipped (treated as not
+        displayed) rather than aborting the whole scan: this scan backs
+        ``_resolve_ref_channel`` and thus every arm helper, so one transient bad
+        reply must not take down a run. A genuine connection drop
+        (``ScopeConnectionError``) still propagates -- there is nothing left to
+        scan once the link is gone.
+        """
         self.scope.write("COMM_HEADER OFF")
-        # Loop only the channels this scope actually has (C1-C4 or C1-C8, from
+        displayed = ()
+        for name in names:
+            try:
+                if self.scope.query(name + ":TRACE?")[0:2] == "ON":
+                    displayed += (name,)
+            except ScopeConnectionError:
+                raise
+            except Exception:
+                continue
+        return displayed
+
+    def displayed_channels(self) -> Tuple[str, ...]:
+        # Scan only the channels this scope actually has (C1-C4 or C1-C8, from
         # the init-time detection) so we never query non-existent channels --
         # which on a 4-channel scope would stall up to the socket timeout.
-        for ch in self.channel_names:
-            if self.scope.query(ch + ":TRACE?")[0:2] == "ON":
-                channels += (ch,)
-        return channels
+        return self._scan_displayed(self.channel_names)
 
     def displayed_traces(self):
-        traces = ()
-        self.scope.write("COMM_HEADER OFF")
-        for tr in self.valid_trace_names:
-            if self.scope.query(tr + ":TRACE?")[0:2] == "ON":
-                traces += (tr,)
-        return traces
+        return self._scan_displayed(self.valid_trace_names)
 
     def vertical_scale(self, trace) -> float:
         Tn = self.validate_trace(trace)
