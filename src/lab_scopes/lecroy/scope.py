@@ -294,7 +294,7 @@ class LeCroyScope:
             return Cn
         if type(Cn) == int and 1 <= Cn <= self.n_channels:
             return "C" + str(Cn)
-        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-{self.n_channels}').with_traceback(sys.exc_info()[2])
+        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-{self.n_channels}')
 
     def validate_trace(self, tr) -> str:
         if type(tr) == int and 1 <= tr <= self.n_channels:
@@ -580,7 +580,7 @@ class LeCroyScope:
         """Read the sweep counter, assuming WAVEFORM_SETUP is already minimal.
 
         Hot-path helper: skips the WAVEFORM_SETUP write so a tight poll loop
-        (wait_for_single_complete) issues one write + one read per iteration
+        (wait_for_stop_then_complete) issues one write + one read per iteration
         instead of two writes. The counter lives in the fixed 346-byte WAVEDESC
         header, returned in full regardless of the data-point count.
         """
@@ -615,16 +615,14 @@ class LeCroyScope:
         if channel is None:
             channels = self.displayed_channels()
             if not channels:
-                raise RuntimeError(
-                    "**** no displayed channels to poll"
-                ).with_traceback(sys.exc_info()[2])
+                raise RuntimeError("**** no displayed channels to poll")
             return channels[0]
         return self.validate_channel(channel)
 
     def arm_single(self, channel=None) -> str:
         """Arm the scope for a single trigger and return the reference channel.
 
-        Clears the sweep counter first so a subsequent ``wait_for_single_complete``
+        Clears the sweep counter first so a subsequent ``wait_for_stop_then_complete``
         on the returned channel sees an unambiguous 0 -> >=1 transition when a
         fresh trigger lands. The reference channel is ``channel`` if given, else
         the first displayed channel.
@@ -690,8 +688,7 @@ class LeCroyScope:
         a stray pulse around the shot boundary can double-trigger a slave (the
         slave's front panel shows SINGLE twice). Arming once removes that cause;
         correctness for the shot is still guaranteed by the per-shot completion
-        check (sweep counter; see ``wait_for_single_complete`` /
-        ``wait_for_stop_then_complete``).
+        check (sweep counter; see ``wait_for_stop_then_complete``).
 
         If the master reads ``STOP`` instead of ``SIN`` (it fired before we could
         read back, possible only when edges arrive faster than a round-trip), a
@@ -711,28 +708,6 @@ class LeCroyScope:
             print("**** arm_master_single(): master did not arm to SINGLE "
                   f"(TRIG_MODE reads {mode!r}); proceeding best-effort.")
         return channel
-
-    def wait_for_single_complete(self, channel, timeout=100, poll=0.02) -> bool:
-        """Block until a fresh single acquisition has completed.
-
-        Uses the sweep counter as the source of truth: returns ``True`` as soon
-        as the counter is >= 1 (a fresh sweep landed after the ``clear_sweeps``
-        done in ``arm_single``). Because the counter was cleared at arm time, a
-        leftover STOP from a previous shot reads as 0 and cannot be mistaken for
-        a new acquisition. Returns ``False`` on timeout.
-
-        WAVEFORM_SETUP is made minimal once up front, then each poll issues a
-        single :WAVEFORM? read, so a tight wait does not re-send the setup or
-        download full waveforms.
-        """
-        channel = self.validate_channel(channel)
-        self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self._read_sweeps_per_acq(channel) >= 1:
-                return True
-            time.sleep(poll)
-        return False
 
     def wait_for_stop_then_complete(self, channel, timeout=100, poll=0.02) -> bool:
         """Block until the scope is STOPped AND a fresh sweep is confirmed.
