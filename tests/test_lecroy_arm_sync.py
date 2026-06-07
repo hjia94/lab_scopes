@@ -160,9 +160,10 @@ def test_arm_master_single_arms_exactly_once():
     assert t.writes.count("TRIG_MODE SINGLE") == 1
 
 
-def test_arm_master_single_warns_when_not_sin(capsys):
-    # If the master does not hold SIN after arming, a warning is printed but the
-    # call still returns (best-effort), without re-arming.
+def test_arm_master_single_no_warning_when_stop(capsys):
+    # STOP after arming means the master armed and fired before this readback
+    # round-trip -- common against a fast free-running timer and a HEALTHY
+    # outcome. It must NOT warn (warning here was a per-shot false alarm).
     t = FakeTransport()
 
     def query(cmd):
@@ -174,7 +175,24 @@ def test_arm_master_single_warns_when_not_sin(capsys):
     scope = _make_scope(t)
     scope.arm_master_single(channel="C1")
     out = capsys.readouterr().out
-    assert "did not hold SIN" in out
+    assert "did not arm" not in out
+
+
+def test_arm_master_single_warns_when_unexpected_mode(capsys):
+    # A genuinely unexpected mode (the arm did not take) is the only case that
+    # warrants a warning. The call still returns best-effort without re-arming.
+    t = FakeTransport()
+
+    def query(cmd):
+        if cmd == "TRIG_MODE?":
+            return "AUTO"
+        return FakeTransport.query(t, cmd)
+
+    t.query = query
+    scope = _make_scope(t)
+    scope.arm_master_single(channel="C1")
+    out = capsys.readouterr().out
+    assert "did not arm" in out
 
 
 def test_arm_master_single_no_warning_when_sin(capsys):
@@ -183,7 +201,7 @@ def test_arm_master_single_no_warning_when_sin(capsys):
     scope = _make_scope(t)
     scope.arm_master_single(channel="C1")
     out = capsys.readouterr().out
-    assert "did not hold SIN" not in out
+    assert "did not arm" not in out
 
 
 def test_set_trigger_mode_accepts_stop_shortcut():

@@ -701,9 +701,15 @@ class LeCroyScope:
         channel = self._resolve_ref_channel(channel)
         self.clear_sweeps()
         self.set_trigger_mode("SINGLE")
-        if self.scope.query("TRIG_MODE?")[0:3] != "SIN":
-            print("**** arm_master_single(): master did not hold SIN after arming "
-                  "(it may have fired before readback); proceeding best-effort.")
+        # Both SIN (armed, waiting for an edge) and STO (armed then fired before
+        # this readback round-trip -- common against a fast free-running timer)
+        # are healthy outcomes; set_trigger_mode already accepts STO as a valid
+        # arm. Only a genuinely unexpected mode (AUTO/NORM/blank) means the arm
+        # did not take, so warn solely on that to avoid a per-shot false alarm.
+        mode = self.scope.query("TRIG_MODE?")[0:3]
+        if mode not in ("SIN", "STO"):
+            print("**** arm_master_single(): master did not arm to SINGLE "
+                  f"(TRIG_MODE reads {mode!r}); proceeding best-effort.")
         return channel
 
     def wait_for_single_complete(self, channel, timeout=100, poll=0.02) -> bool:
