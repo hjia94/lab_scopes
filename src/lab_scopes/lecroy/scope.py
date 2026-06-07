@@ -51,6 +51,23 @@ SWEEPS_PER_ACQ_OFFSET = 15 + 148
 INR_TRIGGER_READY = 0x2000
 
 
+# Substrings (case-insensitive) of the *IDN? model field that identify LeCroy
+# instruments with 8 analog input channels (C1-C8). Used to skip the probe-based
+# channel-count fallback when the model is recognized -- a zero-round-trip fast
+# path. This list is intentionally conservative and extensible: an 8-channel
+# model NOT listed here simply falls back to a single C5 probe (see
+# _detect_channel_count), so a missing entry costs one extra round-trip, never
+# wrong behavior. Add new 8-channel families here as they are verified on
+# hardware. Known 8-ch LeCroy families: WaveRunner 8000HD, HDO8000/8000A,
+# WavePro HD (8-ch variants).
+LECROY_8CH_MODEL_MARKERS = (
+    "8000HD",
+    "HDO8",
+    "WAVEPRO HD",
+    "WR8",
+)
+
+
 class LeCroyNoDataError(RuntimeError):
     """Raised when a trace's :WAVEFORM? response carries no curve data.
 
@@ -88,9 +105,13 @@ class LeCroyScope:
     idn_string = ""
     trace_bytes = np.zeros(shape=(WAVEDESC_SIZE), dtype="b")
     offscale_fraction = 0.005
+    # 4-channel defaults; __init__ overrides these per detected hardware. Present
+    # at class scope so fakes built via __new__ (skipping __init__) still work.
+    n_channels = 4
+    channel_names = ("C1", "C2", "C3", "C4")
 
     def __init__(self, ipv4_addr: str, verbose: bool = True, timeout: float = 5.0,
-                 port: int = 1861, transport=None):
+                 port: int = 1861, transport=None, discover_traces="channels"):
         self.ipv4_addr = ipv4_addr
         self.verbose = verbose
         self.transport = transport or LeCroyVICPTransport(ipv4_addr, port=port, timeout=_seconds(timeout))
@@ -105,15 +126,71 @@ class LeCroyScope:
         self.scope.write("COMM_HEADER OFF")
         self.scope.write("COMM_FORMAT DEF9,WORD,BIN")
 
-        if len(self.valid_trace_names) == 0:
-            for tr in KNOWN_TRACE_NAMES:
-                try:
-                    self.scope.query(tr + ":TRACE?")
-                    error_code = int(self.scope.query("CMR?"))
-                except Exception:
-                    continue
-                if error_code == 0:
-                    self.valid_trace_names += (tr,)
+        # Determine how many analog input channels this scope has (4 or 8) before
+        # probing any trace names, so we never probe channels that cannot exist.
+        self.n_channels = self._detect_channel_count()
+        self.channel_names = tuple(f"C{i}" for i in range(1, self.n_channels + 1))
+
+        # Discover which trace names this scope actually accepts.
+        #
+        # Probing a name costs two synchronous VICP round-trips (:TRACE? + CMR?),
+        # and an *invalid* name (e.g. math/memory traces, or C5-C8 on a 4-channel
+        # scope) can stall up to the full socket timeout. Probing all 20+
+        # KNOWN_TRACE_NAMES therefore made __init__ hang for many seconds. Default
+        # to just the detected input channels, which is what almost all callers
+        # use and which are all guaranteed valid (zero timeouts); pass
+        # discover_traces="all" to probe the full math/memory/letter set, or an
+        # explicit tuple of names to probe just those.
+        if discover_traces == "channels":
+            candidates = self.channel_names
+        elif discover_traces == "all":
+            candidates = tuple(KNOWN_TRACE_NAMES)
+        else:
+            candidates = tuple(discover_traces)
+        # Instance attribute (shadows the empty class default) so two scopes with
+        # different configurations never share a discovered list.
+        self.valid_trace_names = ()
+        for tr in candidates:
+            try:
+                self.scope.query(tr + ":TRACE?")
+                error_code = int(self.scope.query("CMR?"))
+            except Exception:
+                continue
+            if error_code == 0:
+                self.valid_trace_names += (tr,)
+
+    def _detect_channel_count(self) -> int:
+        """Return the number of analog input channels (4 or 8) on this scope.
+
+        Two-tier strategy that avoids probing channels that cannot exist:
+
+        1. Fast path -- parse the model from ``*IDN?`` (already captured in
+           ``rm_open``). If it matches a known 8-channel family marker, return 8
+           with zero extra round-trips.
+        2. Fallback -- for an unrecognized model, do a single ``C5:TRACE?`` +
+           ``CMR?`` probe. ``CMR? == 0`` means the scope accepted C5, so it has 8
+           channels; any error means 4. This costs one round-trip pair, far
+           cheaper than the multi-second hang of blindly probing C5-C8.
+
+        Defaults to 4 on any failure -- the safe lower bound (a 4-channel set is
+        valid on every supported scope), so a transient comms blip never invents
+        channels that do not exist.
+        """
+        idn_upper = (self.idn_string or "").upper()
+        if any(marker in idn_upper for marker in LECROY_8CH_MODEL_MARKERS):
+            if self.verbose:
+                print("<:> detected 8-channel scope from *IDN?")
+            return 8
+        # Unrecognized model: probe the 4-vs-8 boundary with one C5 query.
+        try:
+            self.scope.query("C5:TRACE?")
+            if int(self.scope.query("CMR?")) == 0:
+                if self.verbose:
+                    print("<:> detected 8-channel scope from C5 probe")
+                return 8
+        except Exception:
+            pass
+        return 4
 
     def __repr__(self):
         return repr(self.scope)
@@ -200,14 +277,19 @@ class LeCroyScope:
             self.scope.write('MESSAGE "' + msg + '"')
 
     def validate_channel(self, Cn) -> str:
-        if type(Cn) == str and Cn in ("C1", "C2", "C3", "C4"):
+        # Bound by the detected channel count (4 or 8). Fall back to 4 when
+        # n_channels is unset -- e.g. a test fake built via __new__ that skips
+        # __init__ -- preserving the historical C1-C4 contract in that case.
+        n = getattr(self, "n_channels", 4)
+        if type(Cn) == str and Cn in tuple(f"C{i}" for i in range(1, n + 1)):
             return Cn
-        if type(Cn) == int and 1 <= Cn <= 4:
+        if type(Cn) == int and 1 <= Cn <= n:
             return "C" + str(Cn)
-        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-4').with_traceback(sys.exc_info()[2])
+        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-{n}').with_traceback(sys.exc_info()[2])
 
     def validate_trace(self, tr) -> str:
-        if type(tr) == int and 1 <= tr <= 4:
+        n = getattr(self, "n_channels", 4)
+        if type(tr) == int and 1 <= tr <= n:
             return "C" + str(tr)
         for trn in self.valid_trace_names:
             if tr == trn:
@@ -222,7 +304,10 @@ class LeCroyScope:
     def displayed_channels(self) -> Tuple[str, ...]:
         channels = ()
         self.scope.write("COMM_HEADER OFF")
-        for ch in ("C1", "C2", "C3", "C4"):
+        # Loop only the channels this scope actually has (C1-C4 or C1-C8, from
+        # the init-time detection) so we never query non-existent channels --
+        # which on a 4-channel scope would stall up to the socket timeout.
+        for ch in self.channel_names:
             if self.scope.query(ch + ":TRACE?")[0:2] == "ON":
                 channels += (ch,)
         return channels
