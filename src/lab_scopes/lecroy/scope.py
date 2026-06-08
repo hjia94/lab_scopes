@@ -3,11 +3,11 @@
 This is based on the LAPD_DAQ ``LeCroy_Scope.py`` driver surface, but the
 connection is a native VICP transport instead of VISA.
 
-TODO: Sequence-mode acquisition is broken in this version. The
-``acquire_sequence_data`` method and the sequence branches in
-``parse_wavedesc`` / ``time_array`` are commented out below until the
-segment read path is fixed. See also tests/test_lecroy_scope_acquire.py
-and tests/test_lecroy_scope_real.py for the corresponding disabled tests.
+TODO: Sequence-mode acquisition is broken in this version. ``acquire_sequence_data``
+raises, and the sequence branches in ``parse_wavedesc`` / ``time_array`` are kept
+commented out (as a restoration reference) until the segment read path is fixed.
+See tests/test_lecroy_scope_acquire.py and tests/test_lecroy_scope_real.py for the
+corresponding disabled tests.
 """
 
 from __future__ import annotations
@@ -445,7 +445,7 @@ class LeCroyScope:
     def parse_wavedesc(self, wd):
         if wd.comm_type not in [0, 1]:
             raise RuntimeError(f"**** wd.comm_type = {wd.comm_type}; expected value is either 0 or 1").with_traceback(sys.exc_info()[2])
-        # TODO: sequence-mode disabled — restore the is_sequence branch when fixed.
+        # Sequence-mode branch disabled (see module TODO):
         # is_sequence = wd.subarray_count > 1
         # if is_sequence:
         #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
@@ -498,8 +498,7 @@ class LeCroyScope:
             return data
         return data.astype(np.float64, copy=False) * wd.vertical_gain - wd.vertical_offset
 
-    # TODO: sequence-mode acquisition is broken — re-enable once the per-segment
-    # :WAVEFORM? read path is fixed and matches LAPD_DAQ behavior.
+    # Sequence-mode acquisition disabled (see module TODO); reference impl:
     # def acquire_sequence_data(self, trace):
     #     _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
     #     wd = self.translate_wavedesc_bytes(wavedesc_bytes)
@@ -522,7 +521,7 @@ class LeCroyScope:
         else:
             _trace_bytes, wavedesc_bytes = self.acquire_bytes(trace)
             wd = self.translate_wavedesc_bytes(wavedesc_bytes)
-        # TODO: sequence-mode disabled — restore the subarray_count > 1 branch when fixed.
+        # Sequence-mode branch disabled (see module TODO):
         # if wd.subarray_count > 1:
         #     NSamples = int(wd.wave_array_1 / wd.subarray_count)
         #     if wd.comm_type == 1:
