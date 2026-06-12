@@ -15,7 +15,7 @@ hardware), so the 4-vs-8 boundary can actually be exercised.
 
 import pytest
 
-from lab_scopes.errors import ScopeConnectionError
+from lab_scopes.errors import ScopeConnectionError, ScopeTimeoutError
 from lab_scopes.lecroy.scope import LeCroyScope
 
 
@@ -38,10 +38,17 @@ class FakeTransport:
     raise_on : str | None
         Substring; if a queried command contains it, raise
         ``ScopeConnectionError`` (models a link drop mid-detection).
+    invalid_trace_times_out : bool
+        If true, a ``Cn:TRACE?`` beyond the channel count behaves like real
+        4-channel LeCroy hardware: the error register is set and **no reply is
+        sent** (the read times out -> ``ScopeTimeoutError``), instead of the
+        default polite ``OFF`` reply. This is the only path where the latched
+        error survives into trace discovery.
     """
 
     def __init__(self, idn="LeCroy,WAVERUNNER 9254,LCRY,1.0", n_channels=4,
-                 displayed=(), cmr_reply=None, raise_on=None):
+                 displayed=(), cmr_reply=None, raise_on=None,
+                 invalid_trace_times_out=False):
         self.connected = False
         self.timeout = 5.0
         self.chunk_size = 0
@@ -50,6 +57,7 @@ class FakeTransport:
         self.displayed = tuple(displayed)
         self.cmr_reply = cmr_reply
         self.raise_on = raise_on
+        self.invalid_trace_times_out = invalid_trace_times_out
         self.writes = []
         self._err = 0          # error register; set by an invalid :TRACE?
         self._last_trace = ""  # channel of the most recent :TRACE? (for CMR?)
@@ -63,6 +71,8 @@ class FakeTransport:
 
     def write(self, cmd):
         self.writes.append(cmd)
+        if cmd == "*CLS":
+            self._err = 0  # IEEE-488.2 clear-status resets the error register
 
     def query(self, cmd):
         self.writes.append(cmd)
@@ -77,6 +87,8 @@ class FakeTransport:
             # register, exactly like real hardware rejecting Cn.
             if ch.startswith("C") and ch[1:].isdigit() and int(ch[1:]) > self.n_channels:
                 self._err = 1
+                if self.invalid_trace_times_out:
+                    raise ScopeTimeoutError(f"no reply to {cmd!r}")
             return "ON" if ch in self.displayed else "OFF"
         if cmd == "CMR?":
             if self.cmr_reply is not None:
@@ -136,6 +148,30 @@ def test_detect_connection_drop_propagates():
     # silently swallowed into a 4-channel mis-detection.
     with pytest.raises(ScopeConnectionError):
         _make(idn="LeCroy,UNKNOWN,LCRY,1.0", n_channels=4, raise_on="C5:TRACE?")
+
+
+def test_c5_probe_timeout_does_not_drop_c1():
+    # Regression: on real 4-channel hardware the C5 detection probe gets no
+    # reply (timeout) and leaves the command-error bit latched in CMR. That
+    # stale error must not be blamed on the first discovery candidate (C1),
+    # which would silently drop the channel from every acquisition.
+    scope, _ = _make(idn="LeCroy,WAVERUNNER 9254,LCRY,1.0", n_channels=4,
+                     invalid_trace_times_out=True)
+    assert scope.n_channels == 4
+    assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
+
+
+def test_discovery_preclear_protects_c1_from_prelatched_error(monkeypatch):
+    # Defense in depth: even if some pre-discovery traffic leaves an error
+    # latched without cleaning up after itself, the discovery loop's own
+    # pre-clear must keep C1 from being blamed for it.
+    def latching_detect(self):
+        self.scope._err = 1  # latched error, no cleanup
+        return 4
+
+    monkeypatch.setattr(LeCroyScope, "_detect_channel_count", latching_detect)
+    scope, _ = _make(n_channels=4)
+    assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
 
 
 # -- discovery / validation honoring the detected count ---------------------- #

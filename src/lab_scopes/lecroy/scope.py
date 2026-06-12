@@ -148,6 +148,10 @@ class LeCroyScope:
             candidates = tuple(KNOWN_TRACE_NAMES)
         else:
             candidates = tuple(discover_traces)
+        # Clear the slate so the first candidate -- always C1 -- is never blamed
+        # for an error latched by earlier traffic (e.g. an aborted detection
+        # probe) and silently dropped.
+        self._clear_status()
         # Instance attribute (shadows the empty class default) so two scopes with
         # different configurations never share a discovered list.
         self.valid_trace_names = ()
@@ -155,10 +159,21 @@ class LeCroyScope:
             try:
                 self.scope.query(tr + ":TRACE?")
                 error_code = int(self.scope.query("CMR?"))
-            except Exception:
-                continue
-            if error_code == 0:
-                self.valid_trace_names += (tr,)
+            except Exception as exc:
+                reason = f"{type(exc).__name__}: {exc}"
+            else:
+                if error_code == 0:
+                    self.valid_trace_names += (tr,)
+                    continue
+                reason = f"CMR={error_code}"
+            if tr in self.channel_names:
+                # A dropped input channel is lost data for the whole run; it
+                # must be visible at run start, not discovered as a missing
+                # dataset in the HDF5 hours later.
+                print(f"**** trace discovery: input channel {tr} rejected "
+                      f"({reason}) -- it will not be acquired")
+            elif self.verbose:
+                print(f"<:> trace discovery: skipping {tr} ({reason})")
 
     def _detect_channel_count(self) -> int:
         """Return the number of analog input channels (4 or 8) on this scope.
@@ -199,8 +214,26 @@ class LeCroyScope:
         except ScopeConnectionError:
             raise
         except Exception:
-            pass
+            # The probe died before its CMR? read could clear the register
+            # (on real 4-channel hardware an invalid trace query sends *no
+            # reply*, so the read times out with the error bit latched).
+            self._clear_status()
         return 4
+
+    def _clear_status(self):
+        """Best-effort ``*CLS`` -- clear the scope's latched status registers.
+
+        CMR (the command-error register) is read-to-clear and latches the most
+        recent command error, so an errored command whose ``CMR?`` read never
+        ran would be blamed on the *next* command -- e.g. dropping C1 from
+        trace discovery after an aborted C5 detection probe. ``*CLS`` is a
+        write (no reply to desync on); failures are swallowed because this
+        runs on paths where the link may already be degraded.
+        """
+        try:
+            self.scope.write("*CLS")
+        except Exception:
+            pass
 
     def __repr__(self):
         return repr(self.scope)
