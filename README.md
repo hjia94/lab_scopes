@@ -7,6 +7,22 @@ Rigol DHO800/DHO900 communication uses plain TCP/SCPI.
 
 LeCroy `.trc` readers work offline.
 
+## What's new in 0.3.1
+
+- **Fix: C1 silently dropped on 4-channel scopes (data loss).** On real
+  4-channel hardware the `C5` channel-count probe introduced in 0.3.0 gets no
+  reply (timeout) and leaves the scope's command-error register (CMR, which is
+  read-to-clear) latched. Trace discovery then blamed that stale error on its
+  first candidate — always `C1` — and dropped it, so every acquisition stored
+  no C1 data. The driver now clears status (`*CLS`) after an aborted probe and
+  again before discovery, and a rejected input channel prints a loud `****`
+  warning at connect time instead of disappearing silently. **Anyone running
+  0.3.0 against a 4-channel LeCroy scope should update.**
+- The real-hardware test suite's `mutating` marker and `MUTATING = True` mode
+  now actually work: the pytest hooks moved to `tests/conftest.py` (pytest
+  ignores hooks defined in test modules), which also removes the
+  `Unknown pytest.mark.mutating` warning.
+
 ## What's new in 0.3.0
 
 - **8-channel LeCroy support.** The driver detects the analog input count (4 or
@@ -103,7 +119,11 @@ The suite has two mutually exclusive modes selected by the
   cycling, `*CAL?` self-calibration (~15 s), and the vertical-scale and
   averaging-count round-trips.
 
-1. Download the test file into any working directory.
+1. Download the test file into any working directory, along with
+   [tests/conftest.py](tests/conftest.py) (same directory) — it registers the
+   `mutating` marker and implements the `MUTATING = True` filtering. Without
+   it, `MUTATING = True` runs *all* tests instead of only the state-mutating
+   ones.
 
 2. Open `test_lecroy_scope_real.py` and edit the constants at the top:
 
