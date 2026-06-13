@@ -7,6 +7,22 @@ Rigol DHO800/DHO900 communication uses plain TCP/SCPI.
 
 LeCroy `.trc` readers work offline.
 
+## What's new in 0.3.2
+
+- **Fix: C5–C8 silently dropped on 8-channel scopes (data loss).** The 4-vs-8
+  channel detection added in 0.3.0 guessed the count from an `*IDN?` model
+  marker list, falling back to a `C5:TRACE?` + `CMR?` probe. Both signals are
+  unreliable: some 4-channel models carry IDNs that look 8-channel, and the C5
+  probe read the command-error register (`CMR`, which is read-to-clear) without
+  clearing it first — so a stale error latched by an earlier init command made a
+  genuine 8-channel scope read as 4, dropping C5–C8 from every acquisition (the
+  mirror image of the 0.3.1 C1 bug). The driver now asks the scope **directly**
+  via `VBS? "return=app.Acquisition.Channels"`, which is authoritative and free
+  of `CMR` timing, falling back to a clean `C1..C8` probe (with a `*CLS`
+  pre-clear before each probe) only when that query is unavailable. The `*IDN?`
+  model string is no longer used for detection. **Anyone running 0.3.0/0.3.1
+  against an 8-channel LeCroy scope should update.**
+
 ## What's new in 0.3.1
 
 - **Fix: C1 silently dropped on 4-channel scopes (data loss).** On real
@@ -18,6 +34,9 @@ LeCroy `.trc` readers work offline.
   again before discovery, and a rejected input channel prints a loud `****`
   warning at connect time instead of disappearing silently. **Anyone running
   0.3.0 against a 4-channel LeCroy scope should update.**
+
+  *Superseded by 0.3.2:* the `C5` probe this fix patched has since been replaced
+  outright by the direct `Acquisition.Channels` query (see above).
 - The real-hardware test suite's `mutating` marker and `MUTATING = True` mode
   now actually work: the pytest hooks moved to `tests/conftest.py` (pytest
   ignores hooks defined in test modules), which also removes the
@@ -26,11 +45,11 @@ LeCroy `.trc` readers work offline.
 ## What's new in 0.3.0
 
 - **8-channel LeCroy support.** The driver detects the analog input count (4 or
-  8) at connect time — a zero-round-trip `*IDN?` model match, falling back to a
-  single `C5` probe for unrecognized models — and bounds channel/trace
-  validation and displayed-channel scans to the channels that actually exist, so
-  it never stalls probing C5–C8 on a 4-channel scope. `channel_names` /
-  `n_channels` expose the detected layout.
+  8) at connect time and bounds channel/trace validation and displayed-channel
+  scans to the channels that actually exist, so it never stalls probing C5–C8 on
+  a 4-channel scope. `channel_names` / `n_channels` expose the detected layout.
+  (The original `*IDN?` match + `C5` probe detection was replaced in 0.3.2 by a
+  direct `Acquisition.Channels` query — see above.)
 - **Master/slave synchronized acquisition.** New arming primitives let a caller
   arm every slave first, confirm each is genuinely trigger-ready via the INR
   status register (`arm_single_and_confirm` / `wait_for_trigger_ready`), then arm
