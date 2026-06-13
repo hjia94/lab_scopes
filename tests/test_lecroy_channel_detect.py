@@ -1,16 +1,23 @@
-"""Unit tests for LeCroy 4-vs-8 channel detection and trace discovery (no hardware).
+"""Unit tests for LeCroy channel-count detection and trace discovery (no hardware).
 
-Covers the init-time logic added on feature/8-channel-support:
-  * _detect_channel_count -- *IDN? marker fast path + C5:TRACE?/CMR? fallback,
+Covers the init-time logic:
+  * _detect_channel_count -- authoritative ``Acquisition.Channels`` VBS query,
+    with a clean-probe (``C1..C8`` + ``*CLS`` per probe) fallback for firmware
+    that does not answer it,
   * channel-count-bounded trace discovery (valid_trace_names),
   * displayed_channels / validate_channel honoring the detected count,
-  * robustness: a connection drop during detection is fatal; an ambiguous reply
-    (timeout / non-numeric CMR?) degrades safely to 4 channels.
+  * robustness: a connection drop during detection is fatal; an unavailable /
+    garbled channel-count reply degrades safely (probe fallback, else 4).
+
+The ``*IDN?`` model string is NOT used for detection -- some 4-channel models
+carry IDNs that look 8-channel, so it is unreliable -- and these tests pin that
+the count comes from ``Acquisition.Channels`` instead.
 
 An error-aware FakeTransport stands in for LeCroyVICPTransport. Unlike the
 arm-sync fake (which answers CMR? == 0 unconditionally), this one models per
 -channel validity: C5-C8 are rejected on a 4-channel scope (CMR? != 0, like real
-hardware), so the 4-vs-8 boundary can actually be exercised.
+hardware), and it can carry a *pre-latched* command error to reproduce the
+read-to-clear hazard that previously mis-detected scopes.
 """
 
 import pytest
@@ -20,21 +27,31 @@ from lab_scopes.lecroy.scope import LeCroyScope
 
 
 class FakeTransport:
-    """Programmable VICP stand-in that models a 4- or 8-channel scope.
+    """Programmable VICP stand-in that models a 2/4/8-channel scope.
 
     Parameters
     ----------
     idn : str
-        Reply to ``*IDN?``.
+        Reply to ``*IDN?`` (recorded as metadata; NOT used for detection).
     n_channels : int
-        Channels the modeled scope physically has (4 or 8). A ``Cn:TRACE?`` for
-        ``n`` beyond this sets the error register so the following ``CMR?``
-        returns non-zero -- mirroring how real hardware rejects an invalid
-        channel. ``displayed`` channels (below) report ``ON``.
+        Channels the modeled scope physically has (2/4/8). Also the value
+        reported by ``VBS? "return=app.Acquisition.Channels"`` unless
+        ``channels_reply`` overrides it. A ``Cn:TRACE?`` for ``n`` beyond this
+        sets the error register so the following ``CMR?`` returns non-zero --
+        mirroring how real hardware rejects an invalid channel. ``displayed``
+        channels (below) report ``ON``.
     displayed : tuple[str, ...]
         Channel names whose ``:TRACE?`` should report ``ON``.
     cmr_reply : str | None
         Override for every ``CMR?`` reply (used to inject a non-numeric value).
+    channels_reply : str | None
+        Override for the ``Acquisition.Channels`` VBS reply. Set to ``""`` or a
+        non-numeric value to force the probe fallback; default reports
+        ``n_channels``.
+    prelatched_err : bool
+        If true, the command-error register starts set (1), as if an earlier
+        command errored and its ``CMR?`` read never ran. Detection must not let
+        this stale error corrupt the channel count.
     raise_on : str | None
         Substring; if a queried command contains it, raise
         ``ScopeConnectionError`` (models a link drop mid-detection).
@@ -42,12 +59,12 @@ class FakeTransport:
         If true, a ``Cn:TRACE?`` beyond the channel count behaves like real
         4-channel LeCroy hardware: the error register is set and **no reply is
         sent** (the read times out -> ``ScopeTimeoutError``), instead of the
-        default polite ``OFF`` reply. This is the only path where the latched
-        error survives into trace discovery.
+        default polite ``OFF`` reply.
     """
 
     def __init__(self, idn="LeCroy,WAVERUNNER 9254,LCRY,1.0", n_channels=4,
-                 displayed=(), cmr_reply=None, raise_on=None,
+                 displayed=(), cmr_reply=None, channels_reply=None,
+                 prelatched_err=False, raise_on=None,
                  invalid_trace_times_out=False):
         self.connected = False
         self.timeout = 5.0
@@ -56,10 +73,11 @@ class FakeTransport:
         self.n_channels = n_channels
         self.displayed = tuple(displayed)
         self.cmr_reply = cmr_reply
+        self.channels_reply = channels_reply
         self.raise_on = raise_on
         self.invalid_trace_times_out = invalid_trace_times_out
         self.writes = []
-        self._err = 0          # error register; set by an invalid :TRACE?
+        self._err = 1 if prelatched_err else 0  # command-error register
         self._last_trace = ""  # channel of the most recent :TRACE? (for CMR?)
 
     # -- transport surface used by LeCroyScope --
@@ -80,6 +98,8 @@ class FakeTransport:
             raise ScopeConnectionError(f"simulated drop on {cmd!r}")
         if cmd == "*IDN?":
             return self.idn
+        if "Acquisition.Channels" in cmd:
+            return self.channels_reply if self.channels_reply is not None else str(self.n_channels)
         if cmd.endswith(":TRACE?"):
             ch = cmd.split(":")[0]
             self._last_trace = ch
@@ -107,58 +127,67 @@ def _make(idn="LeCroy,WAVERUNNER 9254,LCRY,1.0", n_channels=4, **kw):
 
 # -- channel-count detection ------------------------------------------------- #
 
-def test_detect_4ch_unknown_model_via_c5_probe():
-    # Unknown model + C5 rejected (4-ch hardware) -> 4 channels.
-    scope, t = _make(idn="LeCroy,WAVERUNNER 9254,LCRY,1.0", n_channels=4)
+def test_detect_uses_acquisition_channels_4ch():
+    # The count comes straight from Acquisition.Channels -- no C5 probe needed.
+    scope, t = _make(n_channels=4)
     assert scope.n_channels == 4
     assert scope.channel_names == ("C1", "C2", "C3", "C4")
     assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
-    # The boundary probe was issued exactly once, and discovery never probed C5+.
-    assert t.writes.count("C5:TRACE?") == 1
-    assert "C6:TRACE?" not in t.writes
+    # Authoritative query was used; detection never probed C5+ to decide.
+    assert any("Acquisition.Channels" in w for w in t.writes)
+    assert "C5:TRACE?" not in t.writes
 
 
-def test_detect_8ch_via_idn_marker_skips_probe():
-    # A known 8-ch marker decides without any C5 probe (zero extra round-trips).
-    scope, t = _make(idn="LeCroy,WAVERUNNER 8000HD,LCRY,1.0", n_channels=8)
+def test_detect_uses_acquisition_channels_8ch():
+    # An 8-channel scope reports 8 via Acquisition.Channels regardless of model.
+    scope, _ = _make(idn="LeCroy,MYSTERY MODEL,LCRY,1.0", n_channels=8)
     assert scope.n_channels == 8
     assert scope.channel_names == tuple(f"C{i}" for i in range(1, 9))
-    # Detection issued no boundary probe; C5 only appears from discovery.
-    # (Discovery probes C1..C8, so C5:TRACE? is present, but CMR? for it == 0.)
     assert scope.valid_trace_names == tuple(f"C{i}" for i in range(1, 9))
 
 
-def test_detect_8ch_via_c5_probe_fallback():
-    # Unknown model but real 8-ch hardware -> C5 probe accepts -> 8 channels.
-    scope, t = _make(idn="LeCroy,MYSTERY MODEL,LCRY,1.0", n_channels=8)
+def test_detect_ignores_misleading_idn():
+    # Regression: a 4-channel scope whose *IDN? looks 8-channel must still be
+    # detected as 4 -- the model string is never used for the count.
+    scope, _ = _make(idn="LeCroy,WAVERUNNER 8000HD,LCRY,1.0", n_channels=4)
+    assert scope.n_channels == 4
+    assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
+
+
+def test_detect_8ch_survives_prelatched_cmr_error():
+    # Regression for the C5-C8 data loss: a stale command error latched before
+    # detection (e.g. by COMM_FORMAT) must NOT make a real 8-channel scope read
+    # as 4. Acquisition.Channels is authoritative and immune to CMR state.
+    scope, _ = _make(idn="LeCroy,MYSTERY MODEL,LCRY,1.0", n_channels=8,
+                     prelatched_err=True)
     assert scope.n_channels == 8
     assert scope.valid_trace_names == tuple(f"C{i}" for i in range(1, 9))
 
 
-def test_detect_defaults_to_4_on_nonnumeric_cmr():
-    # A non-numeric CMR? after the C5 probe is ambiguous -> safe default of 4
-    # (must NOT be mistaken for "0" == accepted).
-    scope, _ = _make(idn="LeCroy,ODD FIRMWARE,LCRY,1.0", n_channels=8,
-                     cmr_reply="garbage")
+def test_detect_falls_back_to_probe_when_channels_unavailable():
+    # Older firmware that does not answer Acquisition.Channels -> clean-probe
+    # C1..C8, taking the highest contiguous accepted channel.
+    scope, t = _make(n_channels=8, channels_reply="")
+    assert scope.n_channels == 8
+    assert scope.valid_trace_names == tuple(f"C{i}" for i in range(1, 9))
+    # The probe path was actually exercised.
+    assert "C5:TRACE?" in t.writes
+
+
+def test_probe_fallback_4ch_survives_prelatched_error():
+    # Even on the probe fallback, a pre-latched error must not corrupt the
+    # count: each probe is *CLS-cleared first, so C1 is read cleanly and a
+    # 4-channel scope is detected as 4 (not 0/3).
+    scope, _ = _make(n_channels=4, channels_reply="", prelatched_err=True)
     assert scope.n_channels == 4
+    assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
 
 
 def test_detect_connection_drop_propagates():
-    # A genuine link drop during the C5 probe must fail init loudly, not be
-    # silently swallowed into a 4-channel mis-detection.
+    # A genuine link drop during detection must fail init loudly, not be
+    # silently swallowed into a mis-detection.
     with pytest.raises(ScopeConnectionError):
-        _make(idn="LeCroy,UNKNOWN,LCRY,1.0", n_channels=4, raise_on="C5:TRACE?")
-
-
-def test_c5_probe_timeout_does_not_drop_c1():
-    # Regression: on real 4-channel hardware the C5 detection probe gets no
-    # reply (timeout) and leaves the command-error bit latched in CMR. That
-    # stale error must not be blamed on the first discovery candidate (C1),
-    # which would silently drop the channel from every acquisition.
-    scope, _ = _make(idn="LeCroy,WAVERUNNER 9254,LCRY,1.0", n_channels=4,
-                     invalid_trace_times_out=True)
-    assert scope.n_channels == 4
-    assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
+        _make(n_channels=4, raise_on="Acquisition.Channels")
 
 
 def test_discovery_preclear_protects_c1_from_prelatched_error(monkeypatch):
@@ -187,7 +216,7 @@ def test_validate_channel_bounds_4ch():
 
 
 def test_validate_channel_bounds_8ch():
-    scope, _ = _make(idn="LeCroy,8000HD,LCRY,1.0", n_channels=8)
+    scope, _ = _make(n_channels=8)
     assert scope.validate_channel("C8") == "C8"
     assert scope.validate_channel(7) == "C7"
 

@@ -52,23 +52,6 @@ SWEEPS_PER_ACQ_OFFSET = 15 + 148
 INR_TRIGGER_READY = 0x2000
 
 
-# Substrings (case-insensitive) of the *IDN? model field that identify LeCroy
-# instruments with 8 analog input channels (C1-C8). Used to skip the probe-based
-# channel-count fallback when the model is recognized -- a zero-round-trip fast
-# path. This list is intentionally conservative and extensible: an 8-channel
-# model NOT listed here simply falls back to a single C5 probe (see
-# _detect_channel_count), so a missing entry costs one extra round-trip, never
-# wrong behavior. Add new 8-channel families here as they are verified on
-# hardware. Known 8-ch LeCroy families: WaveRunner 8000HD, HDO8000/8000A,
-# WavePro HD (8-ch variants).
-LECROY_8CH_MODEL_MARKERS = (
-    "8000HD",
-    "HDO8",
-    "WAVEPRO HD",
-    "WR8",
-)
-
-
 class LeCroyNoDataError(RuntimeError):
     """Raised when a trace's :WAVEFORM? response carries no curve data.
 
@@ -175,50 +158,72 @@ class LeCroyScope:
             elif self.verbose:
                 print(f"<:> trace discovery: skipping {tr} ({reason})")
 
+    # Channel counts a real LeCroy analog front end can have. Used to sanity-
+    # check the Acquisition.Channels reply (reject a garbled value rather than
+    # invent channels) and to bound the probe fallback.
+    _VALID_CHANNEL_COUNTS = (2, 4, 8)
+
     def _detect_channel_count(self) -> int:
-        """Return the number of analog input channels (4 or 8) on this scope.
+        """Return the number of analog input channels on this scope.
 
-        Two-tier strategy that avoids probing channels that cannot exist:
+        Asks the scope directly via VBS rather than guessing from the model
+        name or a register probe:
 
-        1. Fast path -- parse the model from ``*IDN?`` (already captured in
-           ``rm_open``). If it matches a known 8-channel family marker, return 8
-           with zero extra round-trips.
-        2. Fallback -- for an unrecognized model, do a single ``C5:TRACE?`` +
-           ``CMR?`` probe. ``CMR? == 0`` means the scope accepted C5, so it has 8
-           channels; a non-zero/non-numeric ``CMR?`` (or a read timeout, which a
-           4-channel scope may return for an invalid channel) means 4. This costs
-           one round-trip pair, far cheaper than the multi-second hang of blindly
-           probing C5-C8.
+        1. Primary -- ``VBS? "return=app.Acquisition.Channels"`` returns the
+           physical analog-channel count (2/4/8) in one round-trip. This is
+           authoritative and free of the ``CMR`` read-to-clear timing hazards
+           that previously mis-detected scopes in *both* directions (a stale
+           command error dropping C1 on 4-channel scopes, or making an 8-channel
+           scope read as 4). The ``*IDN?`` model string is NOT used: some
+           4-channel models carry IDNs that look 8-channel, so it is unreliable.
+        2. Fallback -- if the VBS read is empty/garbage (older firmware), probe
+           ``C1..C8`` with a ``*CLS`` pre-clear before *each* probe so existence
+           is read cleanly, and take the highest contiguous channel that the
+           scope accepts (``CMR == 0``).
 
-        Defaults to 4 -- the safe lower bound (a 4-channel set is valid on every
-        supported scope), so an ambiguous reply never invents channels that do
-        not exist. A genuine connection drop (``ScopeConnectionError``) is *not*
-        swallowed: silently returning 4 would mask a dead link as a quiet
-        mis-detection, so it propagates and fails init loudly.
+        Defaults to 4 -- the safe lower bound valid on every supported scope --
+        only if both the query and the probe are inconclusive. A genuine
+        connection drop (``ScopeConnectionError``) propagates: silently
+        returning 4 would mask a dead link as a quiet mis-detection.
         """
-        idn_upper = (self.idn_string or "").upper()
-        if any(marker in idn_upper for marker in LECROY_8CH_MODEL_MARKERS):
-            if self.verbose:
-                print("<:> detected 8-channel scope from *IDN?")
-            return 8
-        # Unrecognized model: probe the 4-vs-8 boundary with one C5 query. A read
-        # timeout / non-numeric CMR? is ambiguous -> treat as 4 (handled by the
-        # broad except + _vbs_int default); a connection drop is fatal and is
-        # re-raised before that.
         try:
-            self.scope.query("C5:TRACE?")
-            if _vbs_int(self.scope.query("CMR?"), default=-1) == 0:
-                if self.verbose:
-                    print("<:> detected 8-channel scope from C5 probe")
-                return 8
+            n = _vbs_int(self.scope.query('VBS? "return=app.Acquisition.Channels"'),
+                         default=0)
         except ScopeConnectionError:
             raise
         except Exception:
-            # The probe died before its CMR? read could clear the register
-            # (on real 4-channel hardware an invalid trace query sends *no
-            # reply*, so the read times out with the error bit latched).
+            n = 0
+        if n in self._VALID_CHANNEL_COUNTS:
+            if self.verbose:
+                print(f"<:> detected {n}-channel scope from Acquisition.Channels")
+            return n
+        if self.verbose:
+            print("<:> Acquisition.Channels unavailable; probing C1-C8 directly")
+        return self._probe_channel_count()
+
+    def _probe_channel_count(self) -> int:
+        """Fallback channel count: highest contiguous Cn the scope accepts.
+
+        Each probe is preceded by a ``*CLS`` write so its ``CMR?`` read reflects
+        only that ``Cn:TRACE?`` -- never a stale error latched by an earlier
+        command (the read-to-clear hazard that caused the C1/C5-C8 data loss).
+        A ``ScopeConnectionError`` propagates; any other failure (e.g. an invalid
+        channel that times out with no reply) stops the contiguous run.
+        """
+        count = 0
+        for n in range(1, 9):
             self._clear_status()
-        return 4
+            try:
+                self.scope.query(f"C{n}:TRACE?")
+                error_code = _vbs_int(self.scope.query("CMR?"), default=-1)
+            except ScopeConnectionError:
+                raise
+            except Exception:
+                break
+            if error_code != 0:
+                break
+            count = n
+        return count if count in self._VALID_CHANNEL_COUNTS else 4
 
     def _clear_status(self):
         """Best-effort ``*CLS`` -- clear the scope's latched status registers.
