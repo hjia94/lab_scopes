@@ -1,75 +1,31 @@
 # lab_scopes
 
-Reusable oscilloscope drivers and offline readers for BaPSF style scope data.
+Reusable oscilloscope drivers and offline readers for scope data.
 
-LeCroy communication uses native VICP/TCP;
-Rigol DHO800/DHO900 communication uses plain TCP/SCPI.
+- **LeCroy** — native VICP/TCP driver for (`LeCroyScope`)
+- **Rigol DHO800/DHO900** — plain TCP/SCPI driver for (`RigolDHO800`)
 
-LeCroy `.trc` readers work offline.
 
 ## What's new in 0.3.2
 
-- **Fix: C5–C8 silently dropped on 8-channel scopes (data loss).** The 4-vs-8
-  channel detection added in 0.3.0 guessed the count from an `*IDN?` model
-  marker list, falling back to a `C5:TRACE?` + `CMR?` probe. Both signals are
-  unreliable: some 4-channel models carry IDNs that look 8-channel, and the C5
-  probe read the command-error register (`CMR`, which is read-to-clear) without
-  clearing it first — so a stale error latched by an earlier init command made a
-  genuine 8-channel scope read as 4, dropping C5–C8 from every acquisition (the
-  mirror image of the 0.3.1 C1 bug). The driver now asks the scope **directly**
-  via `VBS? "return=app.Acquisition.Channels"`, which is authoritative and free
-  of `CMR` timing, falling back to a clean `C1..C8` probe (with a `*CLS`
-  pre-clear before each probe) only when that query is unavailable. The `*IDN?`
-  model string is no longer used for detection. **Anyone running 0.3.0/0.3.1
-  against an 8-channel LeCroy scope should update.**
+- **Fix: C5–C8 silently dropped on 8-channel LeCroy scopes (data loss).
+- Now both 4 and 8-channel scopes are supported.
 
-## What's new in 0.3.1
-
-- **Fix: C1 silently dropped on 4-channel scopes (data loss).** On real
-  4-channel hardware the `C5` channel-count probe introduced in 0.3.0 gets no
-  reply (timeout) and leaves the scope's command-error register (CMR, which is
-  read-to-clear) latched. Trace discovery then blamed that stale error on its
-  first candidate — always `C1` — and dropped it, so every acquisition stored
-  no C1 data. The driver now clears status (`*CLS`) after an aborted probe and
-  again before discovery, and a rejected input channel prints a loud `****`
-  warning at connect time instead of disappearing silently. **Anyone running
-  0.3.0 against a 4-channel LeCroy scope should update.**
-
-  *Superseded by 0.3.2:* the `C5` probe this fix patched has since been replaced
-  outright by the direct `Acquisition.Channels` query (see above).
-- The real-hardware test suite's `mutating` marker and `MUTATING = True` mode
-  now actually work: the pytest hooks moved to `tests/conftest.py` (pytest
-  ignores hooks defined in test modules), which also removes the
-  `Unknown pytest.mark.mutating` warning.
 
 ## What's new in 0.3.0
 
-- **8-channel LeCroy support.** The driver detects the analog input count (4 or
-  8) at connect time and bounds channel/trace validation and displayed-channel
-  scans to the channels that actually exist, so it never stalls probing C5–C8 on
-  a 4-channel scope. `channel_names` / `n_channels` expose the detected layout.
-  (The original `*IDN?` match + `C5` probe detection was replaced in 0.3.2 by a
-  direct `Acquisition.Channels` query — see above.)
-- **Master/slave synchronized acquisition.** New arming primitives let a caller
-  arm every slave first, confirm each is genuinely trigger-ready via the INR
-  status register (`arm_single_and_confirm` / `wait_for_trigger_ready`), then arm
-  the master last exactly once (`arm_master_single`) — so the master's
-  trigger-out can't fire before a slave is listening. Per-shot completion is
-  verified by the WAVEDESC sweep counter (`wait_for_stop_then_complete`), which
-  distinguishes a fresh capture from a leftover STOP.
-- The master arm no longer emits a spurious per-shot warning when it arms and
-  fires before the trigger-mode read-back (a healthy `STOP` against a fast
-  free-running timer); it warns only on a genuinely unexpected mode.
+- **8-channel LeCroy support.**
+- **Master/slave synchronized acquisition.**
+New arming primitives for using multiple scopes together on acquisition. The main purpose is to make sure all scopes are triggered for the same shot.
 
-**Known limitation:** sequence/segment acquisition is still disabled (see
-below); use single-shot acquisition.
+**Known limitation:** sequence/segment acquisition is still unavailable
 
 ## What's new in 0.2.0
 
 - Faster LeCroy waveform acquisition (optimized VICP transfer path, single-fetch raw↔scaled cross-check).
-- Hardened SCPI/VBS response handling: drained query responses for trace-name probe and `*CAL?`, graceful handling of `OFF` VBS replies and empty `:WAVEFORM?` buffers, corrected socket-timeout behavior.
+- Hardened SCPI/VBS response handling.
 - Renamed internals for clarity: `header` → `wavedesc`, `HEADER_SIZE` → `VICP_FRAME_HEADER_SIZE`.
-- Expanded real-hardware test suite (`tests/test_lecroy_scope_real.py`) with end-of-session report, optional waveform plotting, and a `MUTATING` flag for state-altering tests.
+- Add hardware test suite (`tests/test_lecroy_scope_real.py`)
 
 **Known limitation:** sequence/segment acquisition is currently disabled and not available in this release. Use single-shot acquisition; segment mode will return in a later version.
 
@@ -89,8 +45,6 @@ For development: pip install -e .
 
 ## Imports
 
-New code:
-
 ```python
 from lab_scopes.lecroy import LeCroyScope, LeCroyWavedesc
 from lab_scopes.rigol import RigolDHO800, RigolScope
@@ -106,6 +60,31 @@ from read_scope_data import read_trc_data_simplified
 from rigol_scope import RigolScope
 from rigol_dho800 import RigolDHO800
 ```
+
+## Rigol DHO800/DHO900
+
+`RigolDHO800` connects over plain TCP/SCPI and reads the full acquisition record
+(not just the on-screen window). It batches `:WAVeform:DATA?` transfers to work
+around the firmware's per-transfer cap and applies the calibration formula from
+the programming guide.
+
+```python
+from lab_scopes.rigol import RigolDHO800
+
+scope = RigolDHO800("192.168.1.50")
+scope.single()                       # arm a single capture
+scope.wait_until_stopped()           # block until the acquisition completes
+for ch in scope.displayed_channels():
+    wf = scope.read_channel(ch)      # returns a Waveform (raw + calibration)
+    print(ch, wf.points)             # voltage samples vs time
+scope.screen_png("capture.png")      # save a screenshot
+scope.close()
+```
+
+Key methods: `run` / `stop` / `single`, `set_sweep`, `trigger_status`,
+`wait_until_stopped`, `displayed_channels`, `memory_depth`, `sample_rate`,
+`vertical_scale` / `vertical_offset`, `timebase_scale` / `timebase_offset`,
+`read_channel`, and `screen_png`.
 
 ## Tests
 
@@ -174,9 +153,27 @@ skip individually if nothing is on screen.
 
 ### Offline suite (no hardware)
 
-If you do clone the repo, the offline synthetic suite runs with:
+Most of the suite needs no instrument. If you clone the repo, run the full
+offline set with:
 
 ```terminal
 pip install -e ".[dev]"
-pytest tests/test_lecroy_scope_acquire.py -v
+pytest -v
 ```
+
+The offline tests cover:
+
+- `test_lecroy_scope_acquire.py` — synthetic acquire path (raw↔scaled).
+- `test_lecroy_channel_detect.py` — 4-vs-8 channel detection and its
+  connection-drop / unavailable-query robustness.
+- `test_lecroy_arm_sync.py` — master/slave arming and sweep-counter completion
+  primitives.
+- `test_lecroy_header.py`, `test_lecroy_trc_reader.py`,
+  `test_lecroy_hdf5_reader.py` — WAVEDESC parsing and the `.trc` / HDF5 readers.
+- `test_lecroy_vicp_framing.py` — VICP frame handling.
+- `test_legacy_imports.py`, `test_rigol_imports.py`,
+  `test_imports_no_pyvisa.py` — legacy shims, Rigol exports, and that the
+  package imports without `pyvisa` installed.
+
+The two hardware-only files (`test_lecroy_scope_real.py`, above) stay skipped
+until you point them at a scope.
