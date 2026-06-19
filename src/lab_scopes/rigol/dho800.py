@@ -347,7 +347,7 @@ class RigolDHO800:
     _EMPTY_CHUNK_RETRIES = 3
     _EMPTY_CHUNK_BACKOFF = 0.1
 
-    def _read_full_waveform(self, n_total, bytes_per_point):
+    def _read_full_waveform(self, n_total, bytes_per_point, verify_window=False):
         """Read ``n_total`` waveform points via batched ``:WAVeform:DATA?``.
 
         Assumes ``:WAVeform:SOURce`` / ``:WAVeform:MODE`` / ``:WAVeform:FORMat``
@@ -368,6 +368,12 @@ class RigolDHO800:
         terminal; if it still yields no points, the loop stops and returns whatever
         it has (the caller raises on a short record). Any positive return advances
         ``start``, so progress always terminates the loop.
+
+        With ``verify_window=True`` each window's ``:WAVeform:STARt?/:STOP?`` is read
+        back and a mismatch raises ``RigolScopeError``. This guards the historical
+        firmware bug where a large STOP clamped STARt away from the requested value
+        (so the record silently shifted). Off by default -- it adds two queries per
+        chunk -- enable it for diagnostics or near the memory-depth boundary.
         """
         chunks = []
         start = 1
@@ -378,6 +384,14 @@ class RigolDHO800:
             stop = min(start + window - 1, n_total)
             self._write(f':WAVeform:STARt {start}')
             self._write(f':WAVeform:STOP {stop}')
+            if verify_window:
+                got_start = self._query_int(':WAVeform:STARt?')
+                got_stop = self._query_int(':WAVeform:STOP?')
+                if (got_start, got_stop) != (start, stop):
+                    raise RigolScopeError(
+                        f"firmware clamped read window: asked STARt {start}/STOP "
+                        f"{stop}, got STARt {got_start}/STOP {got_stop}"
+                    )
             payload, declared = self._read_block(
                 ':WAVeform:DATA?',
                 timeout=self._waveform_read_timeout(window * bytes_per_point),
@@ -404,7 +418,7 @@ class RigolDHO800:
     # Bytes per sample for each supported :WAVeform:FORMat (Programming Guide §3.28.3).
     _BYTES_PER_POINT = {'BYTE': 1, 'WORD': 2}
 
-    def read_channel(self, channel, fmt='WORD'):
+    def read_channel(self, channel, fmt='WORD', verify_window=False):
         """Read one displayed analog channel in MAXimum mode. Returns a ``Waveform``.
 
         Sequence (Programming Guide §3.28): set source / MAXimum mode / format,
@@ -424,6 +438,10 @@ class RigolDHO800:
         lumped ``:WAVeform:PREamble?`` -- and *after* the format is set, so the
         scope reports the scaling for the format in effect. Conversion uses the
         literal guide formula ``voltage = (raw - YORigin - YREFerence) * YINCrement``.
+
+        ``verify_window=True`` reads each batch's ``:WAVeform:STARt?/:STOP?`` back and
+        raises on a mismatch (a diagnostic guard against firmware window clamping;
+        adds two queries per chunk, so it is off by default).
 
         The scope must already be STOPped: in the Stop state MAXimum mode reads
         the captured internal-memory record behind the on-screen waveform
@@ -470,7 +488,7 @@ class RigolDHO800:
 
         # Fetch the full record in batches (§3.28.5). DATA? returns bytes;
         # bytes_per_point converts to the point count.
-        payload = self._read_full_waveform(n_mdepth, bytes_per_point)
+        payload = self._read_full_waveform(n_mdepth, bytes_per_point, verify_window)
         n = len(payload) // bytes_per_point
         if n <= 0:
             raise RigolScopeError(f"no usable samples for {ch}: got {len(payload)} data bytes")
