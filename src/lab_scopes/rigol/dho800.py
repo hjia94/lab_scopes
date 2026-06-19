@@ -16,7 +16,7 @@ memory record behind the on-screen waveform):
     # scope must already be STOPped after a real trigger
     :WAVeform:SOURce  CHANnel<n>
     :WAVeform:MODE    MAXimum
-    :WAVeform:FORMat  BYTE
+    :WAVeform:FORMat  WORD        # 2 bytes/point, full 12-bit ADC code (§3.28.3)
     N = :ACQuire:MDEPth?          # captured-sample count (§3.3.2)
     :WAVeform:XINCrement? / :WAVeform:XORigin? / :WAVeform:XREFerence?
     :WAVeform:YINCrement? / :WAVeform:YORigin? / :WAVeform:YREFerence?
@@ -50,7 +50,7 @@ Public surface:
         sample_rate()                    -> float  (:ACQuire:SRATe?)
         vertical_scale(ch) / vertical_offset(ch)
         timebase_scale() / timebase_offset()
-        read_channel(ch, fmt='BYTE')     -> Waveform
+        read_channel(ch, fmt='WORD')     -> Waveform   (WORD=12-bit, BYTE=8-bit)
         screen_png(path)                 -> path   (:DISPlay:DATA? PNG dump)
 
     Waveform        dataclass: channel, raw, voltage, time, metadata
@@ -324,63 +324,80 @@ class RigolDHO800:
     # -- the waveform read -------------------------------------------------- #
 
     @staticmethod
-    def _waveform_read_timeout(window_points):
-        """Per-chunk socket timeout (s) for a ``:WAVeform:DATA?`` of this size."""
-        return max(15, 5 + window_points // 1_000_000 * 5)
+    def _waveform_read_timeout(window_bytes):
+        """Per-chunk socket timeout (s) for a ``:WAVeform:DATA?`` of this byte size.
 
-    def _read_full_waveform(self, n_total):
-        """Read ``n_total`` BYTE waveform points via batched ``:WAVeform:DATA?``.
+        Scaled by bytes, not points, since WORD format is 2 bytes/point: a WORD
+        chunk transfers twice the bytes of a BYTE chunk of the same point count.
+        """
+        return max(15, 5 + window_bytes // 1_000_000 * 5)
 
-        Assumes ``:WAVeform:SOURce`` / ``:WAVeform:MODE`` / ``:WAVeform:FORMat
-        BYTE`` are already set. The DHO firmware caps a single ``:WAVeform:DATA?``
-        at some per-transfer point count that varies by model; this loop discovers
-        that cap from the first chunk and then advances ``:WAVeform:STARt`` /
-        ``:WAVeform:STOP`` over windows of that size until the whole record is read
-        (Programming Guide §3.28.5 -- "read in batches", adjacent blocks are
-        consecutive). Returns the concatenated payload bytes (1 byte == 1 point).
+    def _read_full_waveform(self, n_total, bytes_per_point):
+        """Read ``n_total`` waveform points via batched ``:WAVeform:DATA?``.
 
-        Stops early (returning whatever it has) if a chunk yields no data -- the
+        Assumes ``:WAVeform:SOURce`` / ``:WAVeform:MODE`` / ``:WAVeform:FORMat``
+        are already set. ``bytes_per_point`` is 1 for BYTE, 2 for WORD (§3.28.3).
+        The DHO firmware caps a single ``:WAVeform:DATA?`` at some per-transfer
+        point count that varies by model; this loop discovers that cap from the
+        first chunk and then advances ``:WAVeform:STARt`` / ``:WAVeform:STOP`` over
+        windows of that size until the whole record is read (Programming Guide
+        §3.28.5 -- "read in batches", adjacent blocks are consecutive).
+
+        ``:WAVeform:STARt`` / ``:WAVeform:STOP`` and the window cap are counted in
+        **points**, while ``:WAVeform:DATA?`` returns **bytes**, so each chunk's
+        byte length is converted to points (``bytes // bytes_per_point``) before
+        advancing. Returns the concatenated payload bytes (``n_total *
+        bytes_per_point`` when complete).
+
+        Stops early (returning whatever it has) if a chunk yields no points -- the
         only way to make no progress, since any positive return advances ``start``.
         """
         chunks = []
         start = 1
-        window = n_total
+        window = n_total  # window cap, in points
         first = True
         while start <= n_total:
             stop = min(start + window - 1, n_total)
             self._write(f':WAVeform:STARt {start}')
             self._write(f':WAVeform:STOP {stop}')
             payload, declared = self._read_block(
-                ':WAVeform:DATA?', timeout=self._waveform_read_timeout(window)
+                ':WAVeform:DATA?',
+                timeout=self._waveform_read_timeout(window * bytes_per_point),
             )
-            got = min(len(payload), declared)
-            if got <= 0:
+            got_bytes = min(len(payload), declared)
+            points_got = got_bytes // bytes_per_point  # whole points only
+            if points_got <= 0:
                 break  # no progress possible; return the partial record
-            chunks.append(payload[:got])
-            if first and got < n_total:
-                window = got  # adopt the firmware's observed per-transfer cap
+            chunks.append(payload[:points_got * bytes_per_point])
+            if first and points_got < n_total:
+                window = points_got  # adopt the firmware's observed per-transfer cap
             first = False
-            start += got
+            start += points_got
         return b''.join(chunks)
 
-    def read_channel(self, channel, fmt='BYTE'):
+    # Bytes per sample for each supported :WAVeform:FORMat (Programming Guide §3.28.3).
+    _BYTES_PER_POINT = {'BYTE': 1, 'WORD': 2}
+
+    def read_channel(self, channel, fmt='WORD'):
         """Read one displayed analog channel in MAXimum mode. Returns a ``Waveform``.
 
-        Sequence (Programming Guide §3.28): set source / MAXimum mode / BYTE
-        format, ask the scope for its memory depth, query the calibration
-        parameters, then read the whole record via batched ``:WAVeform:DATA?``
-        (``_read_full_waveform`` -- the firmware caps a single transfer, so this
-        loops ``:WAVeform:STARt`` / ``:WAVeform:STOP`` windows until done), then
-        convert.
+        Sequence (Programming Guide §3.28): set source / MAXimum mode / format,
+        ask the scope for its memory depth, query the calibration parameters, then
+        read the whole record via batched ``:WAVeform:DATA?`` (``_read_full_waveform``
+        -- the firmware caps a single transfer, so this loops ``:WAVeform:STARt`` /
+        ``:WAVeform:STOP`` windows until done), then convert.
+
+        ``fmt`` defaults to ``'WORD'`` (2 bytes/point), which carries the scope's
+        full 12-bit ADC code. ``'BYTE'`` (8-bit, top 8 of 12 bits) is also accepted
+        but discards 4 bits of vertical resolution -- WORD is the right choice for
+        data acquisition. WORD codes are little-endian uint16 (§3.28.3).
 
         Calibration (XINCrement/XORigin/XREFerence, YINCrement/YORigin/YREFerence)
         is read with the individual ``:WAVeform:`` parameter queries the guide
         lists as the "Related Commands" for ``:WAVeform:DATA?`` (p.404) -- not the
-        lumped ``:WAVeform:PREamble?``. Conversion uses the literal guide formula
-        ``voltage = (raw - YORigin - YREFerence) * YINCrement``.
-
-        ``fmt`` is currently limited to ``'BYTE'`` (8-bit codes). WORD reads
-        need a verified scaling path before they can be safely enabled.
+        lumped ``:WAVeform:PREamble?`` -- and *after* the format is set, so the
+        scope reports the scaling for the format in effect. Conversion uses the
+        literal guide formula ``voltage = (raw - YORigin - YREFerence) * YINCrement``.
 
         The scope must already be STOPped: in the Stop state MAXimum mode reads
         the captured internal-memory record behind the on-screen waveform
@@ -389,10 +406,11 @@ class RigolDHO800:
         """
         ch = self.channel_name(channel)
         fmt_up = str(fmt).strip().upper()
-        if fmt_up != 'BYTE':
+        if fmt_up not in self._BYTES_PER_POINT:
             raise RigolScopeError(
-                "Only BYTE waveform reads are supported without waveform metadata"
+                f"unsupported waveform format {fmt!r}; use 'WORD' (12-bit) or 'BYTE'"
             )
+        bytes_per_point = self._BYTES_PER_POINT[fmt_up]
 
         self.wait_until_stopped()
 
@@ -424,17 +442,20 @@ class RigolDHO800:
         y_origin = self._query_float(':WAVeform:YORigin?')
         y_reference = self._query_float(':WAVeform:YREFerence?')
 
-        # Fetch the full record in batches (§3.28.5); 1 BYTE == 1 point.
-        payload = self._read_full_waveform(n_mdepth)
-        n = len(payload)
+        # Fetch the full record in batches (§3.28.5). DATA? returns bytes;
+        # bytes_per_point converts to the point count.
+        payload = self._read_full_waveform(n_mdepth, bytes_per_point)
+        n = len(payload) // bytes_per_point
         if n <= 0:
-            raise RigolScopeError(f"no usable samples for {ch}: got {n} data bytes")
+            raise RigolScopeError(f"no usable samples for {ch}: got {len(payload)} data bytes")
         if n < n_mdepth:
             raise RigolScopeError(
                 f"incomplete waveform for {ch}: got {n} of {n_mdepth} memory points"
             )
 
-        raw = np.frombuffer(payload[:n], dtype=np.uint8)
+        # BYTE -> uint8, WORD -> little-endian uint16 (12-bit code in a 16-bit word).
+        dtype = np.dtype('<u2') if fmt_up == 'WORD' else np.dtype(np.uint8)
+        raw = np.frombuffer(payload[:n * bytes_per_point], dtype=dtype)
 
         # Conversion -- literal guide formula (p.404):
         #   voltage = (raw - YORigin - YREFerence) * YINCrement
@@ -450,7 +471,7 @@ class RigolDHO800:
         tb_offset = self.timebase_offset()
 
         metadata = {
-            'format': 0,   # BYTE
+            'format': 0 if fmt_up == 'BYTE' else 1,   # 0=BYTE, 1=WORD (§3.28.3)
             'type': 1,     # MAXimum (§3.28.14)
             'points': n,
             'count': 1,
