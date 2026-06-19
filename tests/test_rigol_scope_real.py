@@ -44,9 +44,9 @@ from lab_scopes.rigol import RigolDHO800, RigolScopeError
 
 
 # === user configuration =====================================================
-SCOPE_IP = None          # set to "192.168.7.59" to enable this suite
-EXPECT_MDEPTH = None     # set to an int (e.g. 25_000_000) to assert the panel depth
-SHOW_PLOT = False        # True: plot full record + highlighted on-screen slice
+SCOPE_IP = "192.168.7.59"          # set to "192.168.7.59" to enable this suite
+EXPECT_MDEPTH = 1_000_000     # set to an int (e.g. 25_000_000) to assert the panel depth
+SHOW_PLOT = True        # True: plot full record + highlighted on-screen slice
 # ============================================================================
 
 TRIGGER_TIMEOUT_S = 30.0
