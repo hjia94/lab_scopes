@@ -411,6 +411,9 @@ class RigolDHO800:
             chunks.append(payload[:points_got * bytes_per_point])
             if first and points_got < n_total:
                 window = points_got  # adopt the firmware's observed per-transfer cap
+                if self.verbose:
+                    print(f"   learned per-transfer cap: {window} points/chunk "
+                          f"({window * bytes_per_point} bytes)")
             first = False
             start += points_got
         return b''.join(chunks)
