@@ -40,7 +40,7 @@ import time
 import numpy as np
 import pytest
 
-from lab_scopes.rigol import RigolDHO800, RigolScopeError
+from lab_scopes.rigol import RigolDHO800
 
 
 # === user configuration =====================================================
@@ -94,16 +94,29 @@ def test_full_record_length(scope):
 
 @_real
 def test_word_is_12bit(scope):
-    """WORD codes use the 12-bit range (0..4095, >256 distinct) -- not 8-bit."""
+    """WORD carries >8-bit resolution, packed in the DHO804's 16-bit code space.
+
+    The DHO804 does NOT return raw 0..4095 codes: it scales the 12-bit ADC code
+    into the uint16 range, centered on :WAVeform:YREFerence? (observed 32768 =
+    2**15). The driver converts using the scope-reported y_reference / y_increment,
+    so voltage is correct regardless of the code packing. Here we confirm the read
+    carries genuine 12-bit resolution: more than 8-bit (so we are not silently
+    getting BYTE data) but no more than 12-bit worth of distinct levels.
+    """
     _armed_stop(scope)
     for ch in _displayed(scope):
         w = scope.read_channel(ch, fmt='WORD')
         assert w.raw.dtype == np.uint16, f"{ch}: raw dtype {w.raw.dtype}, expected uint16"
-        assert w.raw.max() <= 4095, f"{ch}: code {w.raw.max()} exceeds 12-bit range"
         distinct = np.unique(w.raw).size
         assert distinct > 256, (
             f"{ch}: only {distinct} distinct codes -- looks like 8-bit data in a "
             f"16-bit container (check WORD format / endianness)"
+        )
+        # A true 12-bit ADC yields at most 2**12 distinct levels; materially more
+        # would mean 16-bit-wide noise, not 12-bit data. (A signal smaller than full
+        # scale simply uses fewer levels, so this is an upper bound, not equality.)
+        assert distinct <= 4096, (
+            f"{ch}: {distinct} distinct codes exceeds 12-bit (4096) -- not 12-bit data"
         )
 
 
@@ -126,18 +139,35 @@ def test_word_endianness_smooth(scope):
 
 @_real
 def test_word_matches_byte(scope):
-    """WORD voltage approximates the BYTE read of the same (repeating) trace."""
+    """WORD voltage agrees with the BYTE read to within BYTE's own quantization.
+
+    BYTE has ~25 codes/div (the DHO BYTE LSB is vertical_scale/25). WORD resolves
+    finely, so the two reads can only agree to within roughly one BYTE LSB -- the
+    correct tolerance is the BYTE LSB, NOT the signal span. On a near-flat input
+    (span of a few LSBs) the cross-check is uninformative (BYTE is mostly
+    quantization noise), so skip with a hint to raise the input amplitude.
+    """
     _armed_stop(scope)
     ch = _displayed(scope)[0]
     w_word = scope.read_channel(ch, fmt='WORD')
     w_byte = scope.read_channel(ch, fmt='BYTE')
-    # Compare on overlapping length; both are volts after calibration.
+
+    byte_lsb = scope.vertical_scale(ch) / 25.0          # DHO BYTE step (V)
+    span = float(w_word.voltage.max() - w_word.voltage.min())
+    if span < 10 * byte_lsb:
+        pytest.skip(
+            f"{ch}: input span {span:.4g} V is only {span / byte_lsb:.1f} BYTE LSBs "
+            f"-- WORD-vs-BYTE cross-check is uninformative; raise the input amplitude "
+            f"to fill more of the screen"
+        )
+
     n = min(w_word.points, w_byte.points)
     diff = np.abs(w_word.voltage[:n] - w_byte.voltage[:n])
-    span = max(float(w_word.voltage.max() - w_word.voltage.min()), 1e-9)
-    # BYTE quantises to 1/256 of range; allow a few LSB of BYTE step.
-    assert float(np.median(diff)) < 0.05 * span, (
-        f"{ch}: WORD and BYTE voltage disagree (median {np.median(diff):.4g} V)"
+    # Agreement to ~1 BYTE LSB (median) is correct; a calibration/endian bug would
+    # be many LSBs off.
+    assert float(np.median(diff)) < byte_lsb, (
+        f"{ch}: WORD and BYTE disagree by median {np.median(diff):.4g} V "
+        f"(> 1 BYTE LSB = {byte_lsb:.4g} V)"
     )
 
 
