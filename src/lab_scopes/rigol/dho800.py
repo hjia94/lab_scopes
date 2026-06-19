@@ -332,6 +332,12 @@ class RigolDHO800:
         """
         return max(15, 5 + window_bytes // 1_000_000 * 5)
 
+    # A :WAVeform:DATA? that returns no points is usually the scope being
+    # momentarily busy, not the end of the record -- retry a few times with a short
+    # backoff before treating it as terminal (a genuinely stalled scope still bails).
+    _EMPTY_CHUNK_RETRIES = 3
+    _EMPTY_CHUNK_BACKOFF = 0.1
+
     def _read_full_waveform(self, n_total, bytes_per_point):
         """Read ``n_total`` waveform points via batched ``:WAVeform:DATA?``.
 
@@ -349,13 +355,16 @@ class RigolDHO800:
         advancing. Returns the concatenated payload bytes (``n_total *
         bytes_per_point`` when complete).
 
-        Stops early (returning whatever it has) if a chunk yields no points -- the
-        only way to make no progress, since any positive return advances ``start``.
+        An empty chunk is retried (``_EMPTY_CHUNK_RETRIES``) before being treated as
+        terminal; if it still yields no points, the loop stops and returns whatever
+        it has (the caller raises on a short record). Any positive return advances
+        ``start``, so progress always terminates the loop.
         """
         chunks = []
         start = 1
         window = n_total  # window cap, in points
         first = True
+        empty_tries = 0
         while start <= n_total:
             stop = min(start + window - 1, n_total)
             self._write(f':WAVeform:STARt {start}')
@@ -367,7 +376,15 @@ class RigolDHO800:
             got_bytes = min(len(payload), declared)
             points_got = got_bytes // bytes_per_point  # whole points only
             if points_got <= 0:
-                break  # no progress possible; return the partial record
+                empty_tries += 1
+                if empty_tries > self._EMPTY_CHUNK_RETRIES:
+                    break  # scope made no progress after retries; return partial
+                if self.verbose:
+                    print(f"   empty :WAVeform:DATA? at point {start}, "
+                          f"retry {empty_tries}/{self._EMPTY_CHUNK_RETRIES}")
+                time.sleep(self._EMPTY_CHUNK_BACKOFF)
+                continue
+            empty_tries = 0  # progress made; reset the retry budget
             chunks.append(payload[:points_got * bytes_per_point])
             if first and points_got < n_total:
                 window = points_got  # adopt the firmware's observed per-transfer cap
