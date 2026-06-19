@@ -323,14 +323,23 @@ class RigolDHO800:
 
     # -- the waveform read -------------------------------------------------- #
 
-    @staticmethod
-    def _waveform_read_timeout(window_bytes):
-        """Per-chunk socket timeout (s) for a ``:WAVeform:DATA?`` of this byte size.
+    # Per-chunk :WAVeform:DATA? timeout model: a fixed floor plus a per-MB
+    # allowance. Scaled by BYTES, not points, because WORD is 2 bytes/point -- a
+    # WORD chunk transfers twice the bytes of a BYTE chunk of the same point count.
+    # The per-MB figure is deliberately conservative: it bounds a single transfer,
+    # not the whole record, and a deep/slow read can pause before the trailing
+    # newline (see rigol_functions.command). Tune _WAVEFORM_TIMEOUT_S_PER_MB from a
+    # measured worst-case 25M WORD read if a deep transfer ever times out.
+    _WAVEFORM_TIMEOUT_FLOOR_S = 15
+    _WAVEFORM_TIMEOUT_BASE_S = 5
+    _WAVEFORM_TIMEOUT_S_PER_MB = 5
 
-        Scaled by bytes, not points, since WORD format is 2 bytes/point: a WORD
-        chunk transfers twice the bytes of a BYTE chunk of the same point count.
-        """
-        return max(15, 5 + window_bytes // 1_000_000 * 5)
+    @classmethod
+    def _waveform_read_timeout(cls, window_bytes):
+        """Per-chunk socket timeout (s) for a ``:WAVeform:DATA?`` of this byte size."""
+        per_mb = window_bytes // 1_000_000 * cls._WAVEFORM_TIMEOUT_S_PER_MB
+        return max(cls._WAVEFORM_TIMEOUT_FLOOR_S,
+                   cls._WAVEFORM_TIMEOUT_BASE_S + per_mb)
 
     # A :WAVeform:DATA? that returns no points is usually the scope being
     # momentarily busy, not the end of the record -- retry a few times with a short
