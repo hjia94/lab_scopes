@@ -17,6 +17,7 @@ from typing import Tuple
 
 import numpy as np
 
+from lab_scopes.errors import ScopeConnectionError
 from lab_scopes.transports.lecroy_vicp import LeCroyVICPTransport
 
 from .sequence import segment_sample_count, split_segments
@@ -33,6 +34,22 @@ from .constants import (
     WAVEDESC_FMT,
     WAVEDESC_SIZE,
 )
+
+
+# Byte offset of the WAVEDESC ``sweeps_per_acq`` (int32) field within a
+# :WAVEFORM? response: 15-byte VICP/command preamble + 148-byte offset into the
+# WAVEDESC. Used as a monotonic completed-sweep counter to detect a *fresh*
+# acquisition (after CLEAR_SWEEPS) rather than relying on the ambiguous STOP state.
+SWEEPS_PER_ACQ_OFFSET = 15 + 148
+
+
+# Bit in the LeCroy X-Stream INR (Internal state change Register, read via
+# "INR?") that means "trigger is ready / waiting for a trigger". Unlike
+# "TRIG_MODE?" -- which reports the configured mode and flips to SIN before the
+# trigger subsystem has finished re-arming -- this bit reflects the trigger
+# engine actually being armed and listening, so it is the race-free signal that a
+# scope (e.g. a slave) is ready to capture an edge. INR is read-to-clear.
+INR_TRIGGER_READY = 0x2000
 
 
 class LeCroyNoDataError(RuntimeError):
@@ -72,9 +89,13 @@ class LeCroyScope:
     idn_string = ""
     trace_bytes = np.zeros(shape=(WAVEDESC_SIZE), dtype="b")
     offscale_fraction = 0.005
+    # 4-channel defaults; __init__ overrides these per detected hardware. Present
+    # at class scope so fakes built via __new__ (skipping __init__) still work.
+    n_channels = 4
+    channel_names = ("C1", "C2", "C3", "C4")
 
     def __init__(self, ipv4_addr: str, verbose: bool = True, timeout: float = 5.0,
-                 port: int = 1861, transport=None):
+                 port: int = 1861, transport=None, discover_traces="channels"):
         self.ipv4_addr = ipv4_addr
         self.verbose = verbose
         self.transport = transport or LeCroyVICPTransport(ipv4_addr, port=port, timeout=_seconds(timeout))
@@ -89,15 +110,135 @@ class LeCroyScope:
         self.scope.write("COMM_HEADER OFF")
         self.scope.write("COMM_FORMAT DEF9,WORD,BIN")
 
-        if len(self.valid_trace_names) == 0:
-            for tr in KNOWN_TRACE_NAMES:
-                try:
-                    self.scope.query(tr + ":TRACE?")
-                    error_code = int(self.scope.query("CMR?"))
-                except Exception:
-                    continue
+        # Determine how many analog input channels this scope has (4 or 8) before
+        # probing any trace names, so we never probe channels that cannot exist.
+        self.n_channels = self._detect_channel_count()
+        self.channel_names = tuple(f"C{i}" for i in range(1, self.n_channels + 1))
+
+        # Discover which trace names this scope actually accepts.
+        #
+        # Probing a name costs two synchronous VICP round-trips (:TRACE? + CMR?),
+        # and an *invalid* name (e.g. math/memory traces, or C5-C8 on a 4-channel
+        # scope) can stall up to the full socket timeout. Probing all 20+
+        # KNOWN_TRACE_NAMES therefore made __init__ hang for many seconds. Default
+        # to just the detected input channels, which is what almost all callers
+        # use and which are all guaranteed valid (zero timeouts); pass
+        # discover_traces="all" to probe the full math/memory/letter set, or an
+        # explicit tuple of names to probe just those.
+        if discover_traces == "channels":
+            candidates = self.channel_names
+        elif discover_traces == "all":
+            candidates = tuple(KNOWN_TRACE_NAMES)
+        else:
+            candidates = tuple(discover_traces)
+        # Clear the slate so the first candidate -- always C1 -- is never blamed
+        # for an error latched by earlier traffic (e.g. an aborted detection
+        # probe) and silently dropped.
+        self._clear_status()
+        # Instance attribute (shadows the empty class default) so two scopes with
+        # different configurations never share a discovered list.
+        self.valid_trace_names = ()
+        for tr in candidates:
+            try:
+                self.scope.query(tr + ":TRACE?")
+                error_code = int(self.scope.query("CMR?"))
+            except Exception as exc:
+                reason = f"{type(exc).__name__}: {exc}"
+            else:
                 if error_code == 0:
                     self.valid_trace_names += (tr,)
+                    continue
+                reason = f"CMR={error_code}"
+            if tr in self.channel_names:
+                # A dropped input channel is lost data for the whole run; it
+                # must be visible at run start, not discovered as a missing
+                # dataset in the HDF5 hours later.
+                print(f"**** trace discovery: input channel {tr} rejected "
+                      f"({reason}) -- it will not be acquired")
+            elif self.verbose:
+                print(f"<:> trace discovery: skipping {tr} ({reason})")
+
+    # Channel counts a real LeCroy analog front end can have. Used to sanity-
+    # check the Acquisition.Channels reply (reject a garbled value rather than
+    # invent channels) and to bound the probe fallback.
+    _VALID_CHANNEL_COUNTS = (2, 4, 8)
+
+    def _detect_channel_count(self) -> int:
+        """Return the number of analog input channels on this scope.
+
+        Asks the scope directly via VBS rather than guessing from the model
+        name or a register probe:
+
+        1. Primary -- ``VBS? "return=app.Acquisition.Channels"`` returns the
+           physical analog-channel count (2/4/8) in one round-trip. This is
+           authoritative and free of the ``CMR`` read-to-clear timing hazards
+           that previously mis-detected scopes in *both* directions (a stale
+           command error dropping C1 on 4-channel scopes, or making an 8-channel
+           scope read as 4). The ``*IDN?`` model string is NOT used: some
+           4-channel models carry IDNs that look 8-channel, so it is unreliable.
+        2. Fallback -- if the VBS read is empty/garbage (older firmware), probe
+           ``C1..C8`` with a ``*CLS`` pre-clear before *each* probe so existence
+           is read cleanly, and take the highest contiguous channel that the
+           scope accepts (``CMR == 0``).
+
+        Defaults to 4 -- the safe lower bound valid on every supported scope --
+        only if both the query and the probe are inconclusive. A genuine
+        connection drop (``ScopeConnectionError``) propagates: silently
+        returning 4 would mask a dead link as a quiet mis-detection.
+        """
+        try:
+            n = _vbs_int(self.scope.query('VBS? "return=app.Acquisition.Channels"'),
+                         default=0)
+        except ScopeConnectionError:
+            raise
+        except Exception:
+            n = 0
+        if n in self._VALID_CHANNEL_COUNTS:
+            if self.verbose:
+                print(f"<:> detected {n}-channel scope from Acquisition.Channels")
+            return n
+        if self.verbose:
+            print("<:> Acquisition.Channels unavailable; probing C1-C8 directly")
+        return self._probe_channel_count()
+
+    def _probe_channel_count(self) -> int:
+        """Fallback channel count: highest contiguous Cn the scope accepts.
+
+        Each probe is preceded by a ``*CLS`` write so its ``CMR?`` read reflects
+        only that ``Cn:TRACE?`` -- never a stale error latched by an earlier
+        command (the read-to-clear hazard that caused the C1/C5-C8 data loss).
+        A ``ScopeConnectionError`` propagates; any other failure (e.g. an invalid
+        channel that times out with no reply) stops the contiguous run.
+        """
+        count = 0
+        for n in range(1, 9):
+            self._clear_status()
+            try:
+                self.scope.query(f"C{n}:TRACE?")
+                error_code = _vbs_int(self.scope.query("CMR?"), default=-1)
+            except ScopeConnectionError:
+                raise
+            except Exception:
+                break
+            if error_code != 0:
+                break
+            count = n
+        return count if count in self._VALID_CHANNEL_COUNTS else 4
+
+    def _clear_status(self):
+        """Best-effort ``*CLS`` -- clear the scope's latched status registers.
+
+        CMR (the command-error register) is read-to-clear and latches the most
+        recent command error, so an errored command whose ``CMR?`` read never
+        ran would be blamed on the *next* command -- e.g. dropping C1 from
+        trace discovery after an aborted C5 detection probe. ``*CLS`` is a
+        write (no reply to desync on); failures are swallowed because this
+        runs on paths where the link may already be degraded.
+        """
+        try:
+            self.scope.write("*CLS")
+        except Exception:
+            pass
 
     def __repr__(self):
         return repr(self.scope)
@@ -184,14 +325,17 @@ class LeCroyScope:
             self.scope.write('MESSAGE "' + msg + '"')
 
     def validate_channel(self, Cn) -> str:
-        if type(Cn) == str and Cn in ("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"):
+        # Bound by the detected channel count (4 or 8). channel_names and
+        # n_channels have class-level 4-channel defaults, so this works even on a
+        # test fake built via __new__ that skips __init__.
+        if type(Cn) == str and Cn in self.channel_names:
             return Cn
-        if type(Cn) == int and 1 <= Cn <= 8:
+        if type(Cn) == int and 1 <= Cn <= self.n_channels:
             return "C" + str(Cn)
-        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-8').with_traceback(sys.exc_info()[2])
+        raise RuntimeError(f'**** validate_channel(): channel = "{Cn}" is not allowed, must be C1-{self.n_channels}')
 
     def validate_trace(self, tr) -> str:
-        if type(tr) == int and 1 <= tr <= 8:
+        if type(tr) == int and 1 <= tr <= self.n_channels:
             return "C" + str(tr)
         for trn in self.valid_trace_names:
             if tr == trn:
@@ -203,21 +347,36 @@ class LeCroyScope:
             self.scope.write('VBS "app.Acquisition.Horizontal.MaxSamples=' + str(N) + '"')
         return _vbs_int(self.scope.query('VBS? "return=app.Acquisition.Horizontal.NumPoints"'), 0)
 
-    def displayed_channels(self) -> Tuple[str, ...]:
-        channels = ()
+    def _scan_displayed(self, names) -> Tuple[str, ...]:
+        """Return the subset of ``names`` whose :TRACE? reports ``ON``.
+
+        A garbled or timed-out reply for one name is skipped (treated as not
+        displayed) rather than aborting the whole scan: this scan backs
+        ``_resolve_ref_channel`` and thus every arm helper, so one transient bad
+        reply must not take down a run. A genuine connection drop
+        (``ScopeConnectionError``) still propagates -- there is nothing left to
+        scan once the link is gone.
+        """
         self.scope.write("COMM_HEADER OFF")
-        for ch in ("C1", "C2", "C3", "C4"):
-            if self.scope.query(ch + ":TRACE?")[0:2] == "ON":
-                channels += (ch,)
-        return channels
+        displayed = ()
+        for name in names:
+            try:
+                if self.scope.query(name + ":TRACE?")[0:2] == "ON":
+                    displayed += (name,)
+            except ScopeConnectionError:
+                raise
+            except Exception:
+                continue
+        return displayed
+
+    def displayed_channels(self) -> Tuple[str, ...]:
+        # Scan only the channels this scope actually has (C1-C4 or C1-C8, from
+        # the init-time detection) so we never query non-existent channels --
+        # which on a 4-channel scope would stall up to the socket timeout.
+        return self._scan_displayed(self.channel_names)
 
     def displayed_traces(self):
-        traces = ()
-        self.scope.write("COMM_HEADER OFF")
-        for tr in self.valid_trace_names:
-            if self.scope.query(tr + ":TRACE?")[0:2] == "ON":
-                traces += (tr,)
-        return traces
+        return self._scan_displayed(self.valid_trace_names)
 
     def vertical_scale(self, trace) -> float:
         Tn = self.validate_trace(trace)
@@ -278,17 +437,17 @@ class LeCroyScope:
         channel = self.validate_channel(channel)
         self.scope.write(channel + ":WAVEFORM?")
         trace_bytes = self.scope.read_raw()
-        initial_sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+        initial_sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
         self.set_trigger_mode("AUTO")
         self.scope.write("CLEAR_SWEEPS")
         time.sleep(0.25)
         self.set_trigger_mode("NORM")
-        sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+        sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
         clear_sweeps_timeout = time.time() + 10
         while time.time() < clear_sweeps_timeout and sweeps_per_acq > 1:
             self.scope.write(channel + ":WAVEFORM?")
             trace_bytes = self.scope.read_raw()
-            sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+            sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
             if sweeps_per_acq < initial_sweeps_per_acq or sweeps_per_acq == 1:
                 break
         self.scope.write("COMM_FORMAT DEF9,BYTE,BIN")
@@ -302,7 +461,7 @@ class LeCroyScope:
             time.sleep(sleep_interval)
             self.scope.write(channel + ":WAVEFORM?")
             trace_bytes = self.scope.read_raw()
-            sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+            sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
             gaaak = sweeps_per_acq
             if sweeps_per_acq >= NSweeps:
                 timed_out = False
@@ -311,7 +470,7 @@ class LeCroyScope:
         self.set_trigger_mode("STOP")
         self.scope.write(channel + ":WAVEFORM?")
         trace_bytes = self.scope.read_raw()
-        sweeps_per_acq = struct.unpack("=l", trace_bytes[15 + 148:15 + 148 + 4])[0]
+        sweeps_per_acq = struct.unpack("=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4])[0]
         if gaaak > sweeps_per_acq:
             self.gaaak_count += 1
             return self.wait_for_sweeps(channel, NSweeps, timeout, sleep_interval)
@@ -433,9 +592,186 @@ class LeCroyScope:
             txt = self.scope.query("TRIG_MODE?")
             if txt[0:3] == trigger_mode[0:3]:
                 break
+            # Fast-trigger case: when arming SINGLE against a free-running timer,
+            # an edge can arrive and the sweep complete before we read back
+            # "SIN", so the scope already reports "STOP". That is a successful
+            # arm-then-immediate-capture, not a failed arm -- accept it instead
+            # of burning all 25 retries waiting for a "SIN" that is already gone.
+            # (The master path, arm_master_single, makes its own strict SIN check
+            # afterward, so it does not depend on this shortcut.)
+            if trigger_mode == "SINGLE" and txt[0:3] == "STO":
+                break
             print("set_trigger_mode(", trigger_mode, ")    attempt", i, ":  TRIG_MODE is", txt)
             time.sleep(0.1)
         return prev_trigger_mode
+
+    def clear_sweeps(self) -> None:
+        """Reset the scope's sweep/acquisition counter.
+
+        After this, ``sweeps_per_acq`` reads as the count of acquisitions
+        completed *since the clear*, so the next completed sweep is detectable
+        as a fresh capture rather than a leftover STOP from a previous shot.
+        """
+        self.scope.write("CLEAR_SWEEPS")
+
+    def _read_sweeps_per_acq(self, channel) -> int:
+        """Read the sweep counter, assuming WAVEFORM_SETUP is already minimal.
+
+        Hot-path helper: skips the WAVEFORM_SETUP write so a tight poll loop
+        (wait_for_stop_then_complete) issues one write + one read per iteration
+        instead of two writes. The counter lives in the fixed 346-byte WAVEDESC
+        header, returned in full regardless of the data-point count.
+        """
+        self.scope.write(channel + ":WAVEFORM?")
+        trace_bytes = self.scope.read_raw()
+        return struct.unpack(
+            "=l", trace_bytes[SWEEPS_PER_ACQ_OFFSET:SWEEPS_PER_ACQ_OFFSET + 4]
+        )[0]
+
+    def sweeps_per_acq(self, channel) -> int:
+        """Return the completed-sweep counter from the channel's WAVEDESC.
+
+        This is a monotonic count (within a shot, after ``clear_sweeps``) of how
+        many acquisitions the scope has completed. It distinguishes a freshly
+        captured trigger (counter advanced) from an ambiguous STOP state, which
+        the scope reports both before any trigger and after a previous one.
+
+        The counter lives in the fixed 346-byte WAVEDESC header, which is always
+        returned in full, so we request a single data point (NP,1) to keep this
+        read cheap -- otherwise it would download the whole waveform.
+        """
+        channel = self.validate_channel(channel)
+        self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
+        return self._read_sweeps_per_acq(channel)
+
+    def _resolve_ref_channel(self, channel=None) -> str:
+        """Return the reference channel to poll: ``channel`` or the first displayed.
+
+        Shared by the arm helpers so the channel-discovery fallback (a scan of
+        the detected input channels via :TRACE? queries) lives in one place.
+        """
+        if channel is None:
+            channels = self.displayed_channels()
+            if not channels:
+                raise RuntimeError("**** no displayed channels to poll")
+            return channels[0]
+        return self.validate_channel(channel)
+
+    def arm_single(self, channel=None) -> str:
+        """Arm the scope for a single trigger and return the reference channel.
+
+        Clears the sweep counter first so a subsequent ``wait_for_stop_then_complete``
+        on the returned channel sees an unambiguous 0 -> >=1 transition when a
+        fresh trigger lands. The reference channel is ``channel`` if given, else
+        the first displayed channel.
+        """
+        channel = self._resolve_ref_channel(channel)
+        self.clear_sweeps()
+        self.set_trigger_mode("SINGLE")
+        return channel
+
+    def read_inr(self) -> int:
+        """Return the LeCroy INR (Internal state change Register) as an int.
+
+        Returns 0 on a non-integer/blank response rather than raising, so a
+        transient communication blip cannot abort a run. Note INR is
+        read-to-clear: each read returns the bits set *since the last read*.
+
+        The last whitespace-separated token is parsed, so this is robust whether
+        COMM_HEADER is OFF (bare ``8192``) or ON (``INR 8192``).
+        """
+        resp = self.scope.query("INR?")
+        token = resp.split()[-1] if isinstance(resp, str) and resp.split() else resp
+        return _vbs_int(token, 0)
+
+    def wait_for_trigger_ready(self, timeout=5.0, poll=0.01) -> bool:
+        """Block until the scope reports its trigger is armed and waiting.
+
+        Polls the INR register for the ``INR_TRIGGER_READY`` bit and returns True
+        as soon as it is seen, or False on timeout. Because INR is read-to-clear,
+        the bit is OR-accumulated across reads within the wait so a set-then-clear
+        transition between two polls is not lost.
+
+        Used to confirm a slave scope is actually listening on its EXT input
+        before the master is armed -- the master's trigger-out drives the slaves,
+        so a slave that is not yet ready would miss the master's edge and desync.
+        """
+        seen = 0
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            seen |= self.read_inr()
+            if seen & INR_TRIGGER_READY:
+                return True
+            time.sleep(poll)
+        return False
+
+    def arm_single_and_confirm(self, channel=None, ready_timeout=5.0):
+        """Arm for a single trigger and confirm the hardware is trigger-ready.
+
+        Returns ``(channel, ready)`` where ``channel`` is the reference channel
+        (as from ``arm_single``) and ``ready`` is True iff the INR trigger-ready
+        bit was observed within ``ready_timeout``. Slaves use this so the caller
+        can withhold arming the master until every slave is confirmed ready.
+        """
+        channel = self.arm_single(channel=channel)
+        ready = self.wait_for_trigger_ready(timeout=ready_timeout)
+        return channel, ready
+
+    def arm_master_single(self, channel=None) -> str:
+        """Arm the master scope for a single trigger (exactly once).
+
+        The master is armed with a single ``CLEAR_SWEEPS`` + ``TRIG_MODE SINGLE``
+        and is NOT re-armed if it does not read back ``SIN``. Re-arming would
+        re-pulse the master's trigger-out, which drives the slaves' EXT input, and
+        a stray pulse around the shot boundary can double-trigger a slave (the
+        slave's front panel shows SINGLE twice). Arming once removes that cause;
+        correctness for the shot is still guaranteed by the per-shot completion
+        check (sweep counter; see ``wait_for_stop_then_complete``).
+
+        If the master reads ``STOP`` instead of ``SIN`` (it fired before we could
+        read back, possible only when edges arrive faster than a round-trip), a
+        warning is printed but the shot proceeds best-effort. Returns the
+        reference channel.
+        """
+        channel = self._resolve_ref_channel(channel)
+        self.clear_sweeps()
+        self.set_trigger_mode("SINGLE")
+        # Both SIN (armed, waiting for an edge) and STO (armed then fired before
+        # this readback round-trip -- common against a fast free-running timer)
+        # are healthy outcomes; set_trigger_mode already accepts STO as a valid
+        # arm. Only a genuinely unexpected mode (AUTO/NORM/blank) means the arm
+        # did not take, so warn solely on that to avoid a per-shot false alarm.
+        mode = self.scope.query("TRIG_MODE?")[0:3]
+        if mode not in ("SIN", "STO"):
+            print("**** arm_master_single(): master did not arm to SINGLE "
+                  f"(TRIG_MODE reads {mode!r}); proceeding best-effort.")
+        return channel
+
+    def wait_for_stop_then_complete(self, channel, timeout=100, poll=0.02) -> bool:
+        """Block until the scope is STOPped AND a fresh sweep is confirmed.
+
+        Two-stage completion check: first wait for ``TRIG_MODE?`` to read ``STOP``
+        (a cheap, fast hint that the single acquisition has ended), then confirm
+        via the sweep counter that a fresh sweep actually landed this shot
+        (``sweeps_per_acq`` >= 1 after the arm-time ``clear_sweeps``). The counter
+        is the source of truth -- STOP alone is ambiguous (the scope reads STOP
+        both before any trigger and after a previous one), so a leftover STOP from
+        a prior shot, which reads counter 0, is never mistaken for fresh data.
+
+        Returns True once both hold, False on timeout. WAVEFORM_SETUP is made
+        minimal once up front so the counter reads stay cheap.
+        """
+        channel = self.validate_channel(channel)
+        self.scope.write("WAVEFORM_SETUP SP,0,NP,1,FP,1,SN,0")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            # Stage 1: STOP hint (cheap TRIG_MODE? read).
+            if self.scope.query("TRIG_MODE?")[0:3] == "STO":
+                # Stage 2: confirm a fresh sweep actually landed (authoritative).
+                if self._read_sweeps_per_acq(channel) >= 1:
+                    return True
+            time.sleep(poll)
+        return False
 
     def expanded_name(self, tr) -> str:
         return EXPANDED_TRACE_NAMES.get(tr, "unknown_trace_name")

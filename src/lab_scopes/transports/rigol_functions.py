@@ -10,7 +10,7 @@ Public API:
     tmc_header_bytes()     IEEE 488.2 TMC block header length.
     expected_data_bytes()  Data payload length declared in the TMC header.
     expected_buff_bytes()  Total expected bytes: header + data + terminator.
-    get_memory_depth()     Read :ACQuire:MDEPth? with fallback.
+    get_memory_depth()     Read :ACQuire:MDEPth? (raises on bad reply).
 """
 
 import select
@@ -190,13 +190,17 @@ def expected_buff_bytes(buff):
 
 
 def get_memory_depth(tn):
-    """Query :ACQuire:MDEPth? and return sample count as int. Returns 12000 on error."""
-    try:
-        response = command(tn, ':ACQuire:MDEPth?').strip()
-        if not response:
-            return 12000
-        return int(float(response))  # handles scientific notation e.g. '1.0000E+04'
-    except (ValueError, TypeError):
-        return 12000
+    """Query :ACQuire:MDEPth? and return the sample count as int.
+
+    :ACQuire:MDEPth? is the authoritative record length the waveform read batches
+    over, so a bad/empty reply must NOT be papered over with a guessed default --
+    that would make the caller read the wrong number of points and report success.
+    Raises ValueError on an empty or non-numeric reply; the caller
+    (``RigolDHO800.memory_depth``) turns that into a RigolScopeError.
+    """
+    response = command(tn, ':ACQuire:MDEPth?').strip()
+    if not response:
+        raise ValueError("empty reply to :ACQuire:MDEPth?")
+    return int(float(response))  # handles scientific notation e.g. '1.0000E+04'
 
 

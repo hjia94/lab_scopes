@@ -48,7 +48,7 @@ WAVEDESC_SIZE = 346
    timebase: see below
    fixed_vert_gain: see below
    vert_coupling: see below
-   wave_source:  0=CH1, 1=CH2, 2=CH3, 3=CH4, 9=Unknown
+   wave_source:  0=CH1, 1=CH2, 2=CH3, 3=CH4, ... 7=CH8, 9=Unknown
 """
 WAVEDESC_FMT = '=16s16shhllllllllll16sl16shhlllllllllhhffffhhfdd48s48sfdBBBBhhfhhhhhhfhhffh'    # for struct...
 #    The initial '=' character specifies native byte order, with standard (C) alignment
@@ -77,11 +77,42 @@ EXPANDED_TRACE_NAMES = {'F1': 'Math1'   , 'F2': 'Math2'   , 'F3': 'Math3'   , 'F
                         'F5': 'Math5'   , 'F6': 'Math6'   , 'F7': 'Math7'   , 'F8': 'Math8'   ,
 					  'TA': 'ChannelA', 'TB': 'ChannelB', 'TC': 'ChannelC', 'TD': 'ChannelD',
 					  'M1': 'Memory1' , 'M2': 'Memory2' , 'M3': 'Memory3' , 'M4': 'Memory4' ,
-					  'C1': 'Channel1', 'C2': 'Channel2', 'C3': 'Channel3', 'C4': 'Channel4' }
+					  'C1': 'Channel1', 'C2': 'Channel2', 'C3': 'Channel3', 'C4': 'Channel4',
+					  'C5': 'Channel5', 'C6': 'Channel6', 'C7': 'Channel7', 'C8': 'Channel8' }
 KNOWN_TRACE_NAMES = sorted(list(EXPANDED_TRACE_NAMES.keys()))
 
 
 #================================================================================================
+
+def wavedesc_trigger_timestamp(wd):
+	"""Return the WAVEDESC trigger time as POSIX-style seconds (float), or None.
+
+	The WAVEDESC stores the trigger instant as explicit fields (tt_year ..
+	tt_second, where tt_second is a double carrying the fractional part). This
+	collapses them to a single comparable float so two scopes' trigger times can
+	be differenced. Returns None if the timestamp is unset/unparseable -- callers
+	use this only for an advisory cross-scope sanity check, never for correctness,
+	so it must never raise.
+
+	Note the absolute value depends on each scope's real-time clock, which may
+	not be synchronized between instruments; only the *difference* taken at the
+	same shot is meaningful, and even then only as a hint.
+	"""
+	import calendar
+
+	try:
+		# tt_year of 0 means the field is unpopulated.
+		if int(wd.tt_year) <= 0:
+			return None
+		sec = float(wd.tt_second)
+		whole = int(sec)
+		frac = sec - whole
+		t = calendar.timegm((int(wd.tt_year), int(wd.tt_months), int(wd.tt_days),
+		                     int(wd.tt_hours), int(wd.tt_minute), whole))
+		return float(t) + frac
+	except Exception:
+		return None
+
 
 class LeCroyWavedesc:
 	""" LeCroy X-Stream scope WAVEDESC interpretation """

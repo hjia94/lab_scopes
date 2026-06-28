@@ -36,27 +36,14 @@ _real = pytest.mark.skipif(
 )
 # @_mutating bundles two markers: a "mutating" tag so the collection hook can
 # identify these tests, and the MUTATING=False skip. In MUTATING=True mode only
-# tests carrying the "mutating" tag run; everything else is skipped by
-# pytest_collection_modifyitems below.
+# tests carrying the "mutating" tag run; everything else in this file is
+# skipped by pytest_collection_modifyitems in conftest.py.
 def _mutating(func):
     func = pytest.mark.mutating(func)
     func = pytest.mark.skipif(
         not MUTATING, reason="MUTATING=False; skipping state-mutating test"
     )(func)
     return func
-
-
-def pytest_configure(config):
-    config.addinivalue_line("markers", "mutating: state-mutating tests run only when MUTATING=True")
-
-
-def pytest_collection_modifyitems(config, items):
-    if not MUTATING:
-        return
-    skip = pytest.mark.skip(reason="MUTATING=True; running only state-mutating tests")
-    for item in items:
-        if "mutating" not in {m.name for m in item.iter_markers()}:
-            item.add_marker(skip)
 
 
 REPORT = {"tests": {}, "traces": {}, "timings": {}, "warnings": [], "waveforms": {}}
