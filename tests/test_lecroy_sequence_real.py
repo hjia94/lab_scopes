@@ -46,6 +46,9 @@ from lab_scopes.lecroy import LeCroyScope, LeCroyNoDataError, WAVEDESC_SIZE
 # === user configuration =====================================================
 SCOPE_IP = "192.168.7.63"   # set to your scope's IPv4 address; None => skip all
 TRACE = None                # None => first displayed trace; or e.g. "C2"
+PLOT_SEGMENTS = False       # True => open a window plotting every segment as a
+                            # trace, for a visual "did the data arrive?" check
+PLOT_SAVE_PATH = None       # e.g. r"C:\temp\seq.png" => also save the figure
 # ============================================================================
 
 
@@ -367,6 +370,50 @@ def test_time_array_matches_segment_length(scope, trace, seq_capture, seq_segmen
         f"time_array length {t.size} != samples/segment {seq_segments[0].size}"
     )
     assert np.all(np.diff(t) > 0), "time_array is not strictly increasing"
+
+
+# === visual check: plot every segment as its own trace ======================
+
+
+@_real
+@pytest.mark.skipif(
+    not PLOT_SEGMENTS,
+    reason="set PLOT_SEGMENTS=True in this file to open the segment plot",
+)
+def test_plot_segments(scope, trace, seq_capture, seq_segments):
+    """Overlay all N segments on one axes (raw int16 vs the per-segment time
+    axis) so you can eyeball that every segment arrived and is non-degenerate.
+    Opt-in via PLOT_SEGMENTS -- it opens a blocking window. Skips cleanly if
+    matplotlib isn't installed."""
+    matplotlib = pytest.importorskip("matplotlib")
+    if not PLOT_SAVE_PATH:
+        matplotlib.use("TkAgg")  # interactive backend for the on-screen window
+    import matplotlib.pyplot as plt
+
+    t = scope.time_array(trace)  # per-segment axis; len == samples/segment
+    t_us = t * 1e6               # microseconds read more naturally than seconds
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    for i, seg in enumerate(seq_segments):
+        arr = np.asarray(seg)
+        ax.plot(t_us, arr, lw=0.8, label=f"seg {i}" if len(seq_segments) <= 12 else None)
+    ax.set_xlabel("time (us, per-segment axis)")
+    ax.set_ylabel("raw ADC counts (int16)")
+    ax.set_title(
+        f"{trace}: {len(seq_segments)} segments x {seq_segments[0].size} samples"
+    )
+    if len(seq_segments) <= 12:
+        ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+
+    if PLOT_SAVE_PATH:
+        fig.savefig(PLOT_SAVE_PATH, dpi=120)
+        print(f"\nsaved segment plot to {PLOT_SAVE_PATH}")
+    else:
+        print("\nclose the plot window to continue the test run...")
+        plt.show()
+    plt.close(fig)
 
 
 # === full report (always passes; run last) ==================================
