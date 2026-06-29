@@ -1,88 +1,101 @@
-tests/test_rigol_scope_real.py::test_full_record_length <:> connecting to Rigol scope at 192.168.7.59:5555
-<:> RIGOL TECHNOLOGIES,DHO804,DHO8A261002424,00.01.05
-<:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.00218, 0.001167] (0.80s)
-PASSED
-tests/test_rigol_scope_real.py::test_word_is_12bit <:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.0023, 0.00128] (0.77s)
-FAILED
-tests/test_rigol_scope_real.py::test_word_endianness_smooth <:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.0023, 0.001513] (0.77s)
-PASSED
-tests/test_rigol_scope_real.py::test_word_matches_byte <:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.0023, 0.001167] (0.77s)
-<:> reading CHANnel1 (BYTE) from internal memory (MAXimum/Stop)
-   1000000 samples, dt=8e-10s, V[-0.003413, 0] (0.65s)
-FAILED
-tests/test_rigol_scope_real.py::test_screen_window_locatable <:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.00218, 0.001167] (0.77s)
 
-CHANnel1: full record 1000000 pts [-0.0004, 0.0004] s; on-screen window [-1e-05, 1e-05] s -> idx [487501, 512501] (25000 pts)
-PASSED
-tests/test_rigol_scope_real.py::test_no_constant_tail <:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.0023, 0.0014] (0.76s)
-PASSED
-tests/test_rigol_scope_real.py::test_deep_read_timing <:> reading CHANnel1 (WORD) from internal memory (MAXimum/Stop)
-   NOTE: CHANnel1 reported YINCrement=6.667e-06V is 0.0033x VerticalScale/25 (0.002V from 0.05V/div) -- expected in MAX/Stop, but worth a glance
-   1000000 samples, dt=8e-10s, V[-0.0023, 0.001167] (0.74s)
+================================================================================================ FAILURES =================================================================================================
+__________________________________________________________________________________ test_clear_sweeps_in_stop_is_ignored ___________________________________________________________________________________
 
-CHANnel1: read 1000000 pts (2.0 MB WORD) in 0.76 s (2.6 MB/s)
-PASSED<:> disconnected from Rigol scope
-
-
-======================================================================= FAILURES ========================================================================
-__________________________________________________________________ test_word_is_12bit ___________________________________________________________________
-
-scope = RigolDHO800('192.168.7.59', model='DHO804')
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000001FFD5691EE0>, avg = (10, 'C1')
 
     @_real
-    def test_word_is_12bit(scope):
-        """WORD codes use the 12-bit range (0..4095, >256 distinct) -- not 8-bit."""
-        _armed_stop(scope)
-        for ch in _displayed(scope):
-            w = scope.read_channel(ch, fmt='WORD')
-            assert w.raw.dtype == np.uint16, f"{ch}: raw dtype {w.raw.dtype}, expected uint16"
->           assert w.raw.max() <= 4095, f"{ch}: code {w.raw.max()} exceeds 12-bit range"
-E           AssertionError: CHANnel1: code 32960 exceeds 12-bit range
-E           assert 32960 <= 4095
-E            +  where 32960 = <built-in method max of numpy.ndarray object at 0x00000214CCB78450>()
-E            +    where <built-in method max of numpy.ndarray object at 0x00000214CCB78450> = array([32666, 32562, 32562, ..., 32649, 32649, 32597], dtype=uint16).max
-E            +      where array([32666, 32562, 32562, ..., 32649, 32649, 32597], dtype=uint16) = Waveform(channel='CHANnel1', raw=array([32666, 32562, 32562, ..., 32649, 32649, 32597], dtype=uint16), voltage=array([-0.00068   , -0.00137334, -0.00137334, ..., -0.00079334,\n       -0.00079334, -0.00114001]), time=array([-0.0004, -0.0004, -0.0004, ...,  0.0004,  0.0004,  0.0004]), metadata={'format': 1, 'type': 1, 'points': 1000000, 'count': 1, 'x_increment': 8e-10, 'x_origin': -0.0004, 'x_reference': 0.0, 'y_increment': 6.6667e-06, 'y_origin': 0.0, 'y_reference': 32768.0, 'vertical_scale': 0.05, 'vertical_offset': 0.0, 'timebase_scale': 2e-06, 'timebase_offset': 0.0}).raw
-
-tests\test_rigol_scope_real.py:102: AssertionError
-________________________________________________________________ test_word_matches_byte _________________________________________________________________
-
-scope = RigolDHO800('192.168.7.59', model='DHO804')
-
-    @_real
-    def test_word_matches_byte(scope):
-        """WORD voltage approximates the BYTE read of the same (repeating) trace."""
-        _armed_stop(scope)
-        ch = _displayed(scope)[0]
-        w_word = scope.read_channel(ch, fmt='WORD')
-        w_byte = scope.read_channel(ch, fmt='BYTE')
-        # Compare on overlapping length; both are volts after calibration.
-        n = min(w_word.points, w_byte.points)
-        diff = np.abs(w_word.voltage[:n] - w_byte.voltage[:n])
-        span = max(float(w_word.voltage.max() - w_word.voltage.min()), 1e-9)
-        # BYTE quantises to 1/256 of range; allow a few LSB of BYTE step.
->       assert float(np.median(diff)) < 0.05 * span, (
-            f"{ch}: WORD and BYTE voltage disagree (median {np.median(diff):.4g} V)"
+    def test_clear_sweeps_in_stop_is_ignored(scope, avg):
+        """The core LAPD_DAQ constraint. In STOP the scope ignores CLEAR_SWEEPS, so
+        the counter does NOT reset; only after un-freezing (AUTO/NORM) does the
+        clear take effect. This test documents the actual hardware behavior; if the
+        counter DOES reset in STOP, the un-freeze-before-clear discipline can be
+        relaxed."""
+        nsweeps, ach = avg
+        # This test mutates the sweep counter (clears it in STOP, then in AUTO), so
+        # it needs its OWN fresh accumulation -- it cannot share completed_avg.
+        timed_out, _ = scope.wait_for_max_sweeps(timeout=WAIT_TIMEOUT)
+        if timed_out:
+            pytest.skip("could not accumulate sweeps to set up the STOP precondition")
+        assert scope.set_trigger_mode("")[0:3] == "STO", "precondition: scope should be in STOP"
+    
+        before = scope.sweeps_per_acq(ach)
+        scope.clear_sweeps()       # issued WHILE in STOP
+        time.sleep(CLEAR_SETTLE_S)
+        after_stop = scope.sweeps_per_acq(ach)
+    
+        scope.set_trigger_mode("AUTO")  # un-freeze
+        scope.clear_sweeps()
+        time.sleep(CLEAR_SETTLE_S)
+        after_unfreeze = scope.sweeps_per_acq(ach)
+        scope.set_trigger_mode("STOP")  # restore frozen state for the next test
+    
+        DIAG["sweeps_before_clear"] = before
+        DIAG["sweeps_after_clear_in_stop"] = after_stop
+        DIAG["sweeps_after_clear_unfrozen"] = after_unfreeze
+        # The actionable assertion: clearing after un-freezing genuinely resets.
+        # Bound is <=1 (not 0) because AUTO free-runs during the CLEAR_SETTLE_S
+        # sleep, so one fresh sweep can land between the clear and the read.
+>       assert after_unfreeze <= 1, (
+            f"counter is {after_unfreeze} after AUTO+CLEAR_SWEEPS, expected <=1 -- "
+            f"un-freeze-before-clear did NOT reset the average"
         )
-E       AssertionError: CHANnel1: WORD and BYTE voltage disagree (median 0.0009134 V)
-E       assert 0.0009133627 < (0.05 * 0.0034666840000000003)
-E        +  where 0.0009133627 = float(0.0009133627)
-E        +    where 0.0009133627 = <function median at 0x00000214CC9F1430>(array([0.00068003, 0.00024   , 0.00079336, ..., 0.00137337, 0.0010267 ,\n       0.00126003]))
-E        +      where <function median at 0x00000214CC9F1430> = np.median
+E       AssertionError: counter is 5 after AUTO+CLEAR_SWEEPS, expected <=1 -- un-freeze-before-clear did NOT reset the average
+E       assert 5 <= 1
 
-tests\test_rigol_scope_real.py:139: AssertionError
-================================================================ short test summary info ================================================================
-FAILED tests/test_rigol_scope_real.py::test_word_is_12bit - AssertionError: CHANnel1: code 32960 exceeds 12-bit range
-FAILED tests/test_rigol_scope_real.py::test_word_matches_byte - AssertionError: CHANnel1: WORD and BYTE voltage disagree (median 0.0009134 V)
-============================================================= 2 failed, 5 passed in 44.28s ==============================================================
+tests\test_lecroy_averaging_real.py:201: AssertionError
+_____________________________________________________________________________________ test_averaged_trace_reads_int16 _____________________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000001FFD5691EE0>, completed_avg = {'channel': 'C1', 'comm_before': 1, 'n': 10, 'nsweeps': 10}
+
+    @_real
+    def test_averaged_trace_reads_int16(scope, completed_avg):
+        """After averaging completes, acquire(raw=True) must return raw int16 (1-D),
+        readable with the same path SINGLE uses. raw=False would give scaled floats
+        that the int16 cast downstream would zero. Reuses the completed_avg cycle --
+        the scope is already frozen in STOP at >= NSweeps."""
+        data, _wd = scope.acquire(completed_avg["channel"], raw=True)
+        arr = np.asarray(data)
+        DIAG["avg_trace_len"] = int(arr.size)
+        DIAG["avg_trace_dtype"] = str(arr.dtype)
+        assert arr.ndim == 1, "averaged trace should be 1-D"
+>       assert arr.dtype == np.dtype("<i2"), (
+            f"averaged trace dtype {arr.dtype}, expected int16 (<i2)"
+        )
+E       AssertionError: averaged trace dtype int8, expected int16 (<i2)
+E       assert dtype('int8') == dtype('int16')
+E        +  where dtype('int8') = array([0, 0, 0, ..., 0, 0, 0], dtype=int8).dtype
+E        +  and   dtype('int16') = <class 'numpy.dtype'>('<i2')
+E        +    where <class 'numpy.dtype'> = np.dtype
+
+tests\test_lecroy_averaging_real.py:251: AssertionError
+_________________________________________________________________________________ test_comm_type_survives_averaging_cycle _________________________________________________________________________________
+
+scope = <lab_scopes.transports.lecroy_vicp.LeCroyVICPTransport object at 0x000001FFD5691EE0>, completed_avg = {'channel': 'C1', 'comm_before': 1, 'n': 10, 'nsweeps': 10}
+
+    @_real
+    def test_comm_type_survives_averaging_cycle(scope, completed_avg):
+        """wait_for_sweeps writes COMM_FORMAT ...,BYTE and never restores WORD.
+        comm_type must read 1 (WORD) BEFORE and AFTER a full averaging cycle; if it
+        flips to 0 afterward, every subsequent sequence read halves its sample math
+        -- the single state leak that can silently corrupt a mixed run. The BEFORE
+        baseline + the cycle come from completed_avg; this test does the AFTER read."""
+        before = completed_avg["comm_before"]
+        after = scope.translate_wavedesc_bytes(
+            scope.acquire_bytes(completed_avg["channel"], seg=0)[1]
+        ).comm_type
+        DIAG["comm_type_after_avg"] = after
+        assert before == 1, f"comm_type started at {before}, expected 1 (WORD)"
+>       assert after == 1, (
+            f"comm_type is {after} (BYTE) after the averaging cycle; "
+            f"wait_for_sweeps left COMM_FORMAT as BYTE -- WORD state leak"
+        )
+E       AssertionError: comm_type is 0 (BYTE) after the averaging cycle; wait_for_sweeps left COMM_FORMAT as BYTE -- WORD state leak
+E       assert 0 == 1
+
+tests\test_lecroy_averaging_real.py:275: AssertionError
+========================================================================================= short test summary info =========================================================================================
+FAILED tests/test_lecroy_averaging_real.py::test_clear_sweeps_in_stop_is_ignored - AssertionError: counter is 5 after AUTO+CLEAR_SWEEPS, expected <=1 -- un-freeze-before-clear did NOT reset the average
+FAILED tests/test_lecroy_averaging_real.py::test_averaged_trace_reads_int16 - AssertionError: averaged trace dtype int8, expected int16 (<i2)
+FAILED tests/test_lecroy_averaging_real.py::test_comm_type_survives_averaging_cycle - AssertionError: comm_type is 0 (BYTE) after the averaging cycle; wait_for_sweeps left COMM_FORMAT as BYTE -- WORD state leak
+================================================================================= 3 failed, 4 passed in 97.40s (0:01:37) ==================================================================================

@@ -45,7 +45,7 @@ from lab_scopes.lecroy import LeCroyScope
 
 
 # === user configuration =====================================================
-SCOPE_IP = "192.168.7.63"   # set to your scope's IPv4 address; None => skip all
+SCOPE_IP = "192.168.7.65"   # set to your scope's IPv4 address; None => skip all
 CHANNEL = None              # None => channel from max_averaging_count(); or "C1"
 ALLOW_SET_AVERAGING = False # True => the suite may set a small AverageSweeps
 SET_AVERAGING_TO = 10       # used only when ALLOW_SET_AVERAGING is True
