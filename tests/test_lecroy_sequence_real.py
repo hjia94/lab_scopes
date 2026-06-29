@@ -44,11 +44,8 @@ from lab_scopes.lecroy import LeCroyScope, LeCroyNoDataError, WAVEDESC_SIZE
 
 
 # === user configuration =====================================================
-SCOPE_IP = "192.168.7.63"   # set to your scope's IPv4 address; None => skip all
+SCOPE_IP = "192.168.7.65"   # set to your scope's IPv4 address; None => skip all
 TRACE = None                # None => first displayed trace; or e.g. "C2"
-PLOT_SEGMENTS = False       # True => open a window plotting every segment as a
-                            # trace, for a visual "did the data arrive?" check
-PLOT_SAVE_PATH = None       # e.g. r"C:\temp\seq.png" => also save the figure
 # ============================================================================
 
 
@@ -376,18 +373,12 @@ def test_time_array_matches_segment_length(scope, trace, seq_capture, seq_segmen
 
 
 @_real
-@pytest.mark.skipif(
-    not PLOT_SEGMENTS,
-    reason="set PLOT_SEGMENTS=True in this file to open the segment plot",
-)
 def test_plot_segments(scope, trace, seq_capture, seq_segments):
     """Overlay all N segments on one axes (raw int16 vs the per-segment time
     axis) so you can eyeball that every segment arrived and is non-degenerate.
-    Opt-in via PLOT_SEGMENTS -- it opens a blocking window. Skips cleanly if
-    matplotlib isn't installed."""
-    matplotlib = pytest.importorskip("matplotlib")
-    if not PLOT_SAVE_PATH:
-        matplotlib.use("TkAgg")  # interactive backend for the on-screen window
+    Opens a blocking window -- close it to finish the run."""
+    import matplotlib
+    matplotlib.use("TkAgg")  # interactive backend for the on-screen window
     import matplotlib.pyplot as plt
 
     t = scope.time_array(trace)  # per-segment axis; len == samples/segment
@@ -407,12 +398,8 @@ def test_plot_segments(scope, trace, seq_capture, seq_segments):
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
 
-    if PLOT_SAVE_PATH:
-        fig.savefig(PLOT_SAVE_PATH, dpi=120)
-        print(f"\nsaved segment plot to {PLOT_SAVE_PATH}")
-    else:
-        print("\nclose the plot window to continue the test run...")
-        plt.show()
+    print("\nclose the plot window to continue the test run...")
+    plt.show()
     plt.close(fig)
 
 
