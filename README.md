@@ -31,6 +31,8 @@ New arming primitives for using multiple scopes together on acquisition. The mai
 
 ## Install
 
+Requires **Python 3.11+** (developed and tested on 3.14).
+
 ```terminal
 pip install "git+https://github.com/hjia94/lab_scopes.git"
 ```
