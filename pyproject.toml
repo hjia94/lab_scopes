@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
-  {name = "LAPD/BaPSF contributors"},
+  {name = "LAPD/BaPSF contributors", email = "44660758+hjia94@users.noreply.github.com"},
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -22,6 +22,11 @@ classifiers = [
 dependencies = [
   "numpy",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hjia94/lab_scopes"
+Source = "https://github.com/hjia94/lab_scopes"
+Issues = "https://github.com/hjia94/lab_scopes/issues"
 
 [project.optional-dependencies]
 hdf5 = ["h5py"]
