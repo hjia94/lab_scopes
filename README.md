@@ -77,6 +77,28 @@ Key methods: `run` / `stop` / `single`, `set_sweep`, `trigger_status`,
 `vertical_scale` / `vertical_offset`, `timebase_scale` / `timebase_offset`,
 `read_channel`, and `screen_png`.
 
+**Time limits and errors.** Every wait has its own ceiling (15 s per text query,
+a byte-scaled ceiling per waveform chunk). Pass a `Deadline` to cap a whole
+operation:
+
+```python
+from lab_scopes.transports import Deadline
+
+with RigolDHO800(ip, timeout=1.0, deadline=Deadline(2.5)) as scope:  # connect + reads
+    scope.stop()
+    wf = scope.read_channel(1)
+```
+
+`scope.deadline` can be replaced between operations. A settle delay or retry
+backoff is never shortened to fit; the operation fails instead.
+
+Failures raise `lab_scopes.errors` types: `ScopeTimeoutError`,
+`ScopeConnectionError`, `ScopeProtocolError`, and `RigolScopeError` for
+device-state problems. All are `ScopeError`, a `RuntimeError`. After a
+transport failure the connection is closed and later calls raise
+`ScopeConnectionError`: port 5555 has no device clear, so a late reply would
+otherwise answer the next query. Open a new `RigolDHO800` to reconnect.
+
 ### Offline file readers
 
 ```python
@@ -86,6 +108,16 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
 ```
 
 ---
+
+## What's new in 0.5.0
+
+- **Rigol time limits without signals.** An optional `Deadline` bounds a whole
+  Rigol operation (connect, queries, waveform reads, settle delays), on
+  Windows and Linux. Commands sent and replies decoded are unchanged.
+- **Rigol error handling.** Timeouts, lost connections and malformed replies
+  raise distinct `ScopeError` types instead of being retried silently or
+  returned as partial data. A timed-out query no longer returns its default
+  value, and a failed connection is closed rather than reused.
 
 ## What's new in 0.4.0
 
@@ -213,6 +245,9 @@ The offline tests cover:
 - `test_lecroy_header.py`, `test_lecroy_trc_reader.py`,
   `test_lecroy_hdf5_reader.py` — WAVEDESC parsing and the `.trc` / HDF5 readers.
 - `test_lecroy_vicp_framing.py` — VICP frame handling.
+- `test_rigol_chunked_read.py` — batched Rigol waveform reads.
+- `test_rigol_deadline.py` — Rigol deadlines and error handling against a
+  loopback fake scope, including the exact command bytes sent.
 - `test_legacy_imports.py`, `test_rigol_imports.py`,
   `test_imports_no_pyvisa.py` — legacy shims, Rigol exports, and that the
   package imports without `pyvisa` installed.

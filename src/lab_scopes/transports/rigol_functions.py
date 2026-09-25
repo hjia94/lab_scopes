@@ -11,10 +11,17 @@ Public API:
     expected_data_bytes()  Data payload length declared in the TMC header.
     expected_buff_bytes()  Total expected bytes: header + data + terminator.
     get_memory_depth()     Read :ACQuire:MDEPth? (raises on bad reply).
+
+Every wait is capped by its own timeout and, when a ``Deadline`` is passed, by the time
+left. After any raise the connection must not be reused: it may hold a late reply.
 """
 
 import select
+import socket
 import time
+
+from lab_scopes.errors import ScopeConnectionError, ScopeProtocolError, ScopeTimeoutError
+from lab_scopes.transports.deadline import clamp, sleep
 
 
 def _raw_socket_recv(tn, max_bytes, poll_timeout):
@@ -28,17 +35,38 @@ def _raw_socket_recv(tn, max_bytes, poll_timeout):
     ready, _, _ = select.select([sock], [], [], poll_timeout)
     if not ready:
         return b''
-    return sock.recv(max_bytes)
+    chunk = sock.recv(max_bytes)
+    if not chunk:
+        # Readable with no data is EOF, not a pause.
+        raise ScopeConnectionError("connection closed by the scope")
+    return chunk
 
 
-def command(tn, scpi, timeout=15, binary_data=False):
+def _send(tn, scpi, deadline):
+    step = tn.timeout  # the connection's send timeout (RigolDHO800 sets it after connecting)
+    send_timeout = clamp(deadline, step)  # raises before sending when no time is left
+    shortened = send_timeout < step
+    if shortened:
+        tn.sock.settimeout(send_timeout)
+    try:
+        tn.write((scpi + "\n").encode("utf-8"))
+    except socket.timeout as exc:
+        raise ScopeTimeoutError(f"timed out sending {scpi!r}") from exc
+    except OSError as exc:
+        raise ScopeConnectionError(f"failed to send {scpi!r}: {exc}") from exc
+    finally:
+        if shortened:
+            tn.sock.settimeout(step)
+
+
+def command(tn, scpi, timeout=15, binary_data=False, deadline=None):
     """Send a SCPI command or query and return the response.
 
     Returns a decoded string for text queries, or raw bytes for binary ones.
     Pass binary_data=True to force binary mode regardless of the SCPI string.
     """
     if scpi.endswith('?'):
-        tn.write((scpi + "\n").encode("utf-8"))
+        _send(tn, scpi, deadline)
 
         scpi_upper = scpi.upper()
         if binary_data or ':WAVEFORM:DATA?' in scpi_upper or ':DISPLAY:DATA?' in scpi_upper:
@@ -47,102 +75,95 @@ def command(tn, scpi, timeout=15, binary_data=False):
             tn.rawq = b''
             tn.irawq = 0
             tn.cookedq = b''
+            response = bytearray()  # += on bytes would copy the whole block per chunk
+            start_time = time.monotonic()
+            # Allow up to max_idle_time of silence before the TMC header arrives.
+            # Once the header is parsed we trust the global timeout instead, because
+            # DHO firmware can pause >2 s before sending the trailing newline on
+            # large RAW reads.
+            max_idle_time = min(2.0, max(0.5, timeout / 4.0))
+            last_data_time = start_time
+            total_expected = None
+
             try:
-                response = b""
-                start_time = time.time()
-                # Allow up to max_idle_time of silence before the TMC header arrives.
-                # Once the header is parsed we trust the global timeout instead, because
-                # DHO firmware can pause >2 s before sending the trailing newline on
-                # large RAW reads.
-                max_idle_time = min(2.0, max(0.5, timeout / 4.0))
-                last_data_time = start_time
-                total_expected = None
+                while time.monotonic() - start_time < timeout:
+                    chunk = _raw_socket_recv(tn, 65536, poll_timeout=clamp(deadline, 0.05))
+                    if chunk:
+                        response += chunk
+                        last_data_time = time.monotonic()
 
-                while time.time() - start_time < timeout:
-                    try:
-                        chunk = _raw_socket_recv(tn, 65536, poll_timeout=0.05)
-                        if chunk:
-                            response += chunk
-                            last_data_time = time.time()
-
+                        if total_expected is None:
                             if not response.startswith(b'#'):
                                 marker_index = response.find(b'#')
                                 if marker_index >= 0:
-                                    response = response[marker_index:]
+                                    del response[:marker_index]
 
                             if response.startswith(b'#') and len(response) >= 2:
-                                length_digits = int(chr(response[1]))
-                                header_length = 2 + length_digits
-
+                                header_length = tmc_header_bytes(bytes(response[:2]))
                                 if len(response) >= header_length:
-                                    total_expected = expected_buff_bytes(response)
-                                    if len(response) >= total_expected:
-                                        response = response[:total_expected]
-                                        break
-                        else:
-                            if total_expected is not None and len(response) >= total_expected:
-                                response = response[:total_expected]
-                                break
-                            if total_expected is None and time.time() - last_data_time > max_idle_time:
-                                break
-                            time.sleep(0.01)
-                    except Exception:
+                                    total_expected = expected_buff_bytes(bytes(response[:header_length]))
+
+                        if total_expected is not None and len(response) >= total_expected:
+                            del response[total_expected:]
+                            break
+                    else:
+                        if total_expected is None and time.monotonic() - last_data_time > max_idle_time:
+                            break
                         time.sleep(0.01)
+            except ValueError as exc:
+                raise ScopeProtocolError(f"malformed TMC header in reply to {scpi!r}: {exc}") from exc
+            except socket.timeout as exc:
+                raise ScopeTimeoutError(f"timed out reading the reply to {scpi!r}") from exc
+            except OSError as exc:
+                raise ScopeConnectionError(f"failed reading the reply to {scpi!r}: {exc}") from exc
 
-                if not response.startswith(b'#'):
-                    raise TimeoutError("No TMC header received")
+            response = bytes(response)
+            if not response.startswith(b'#'):
+                raise ScopeTimeoutError(f"No TMC header received for {scpi!r}")
 
-                header_length = tmc_header_bytes(response)
-                data_length = expected_data_bytes(response)
-                total_expected = header_length + data_length + 1
+            header_length = tmc_header_bytes(response)  # validated in the loop
+            data_length = expected_data_bytes(response)
+            total_expected = header_length + data_length + 1
 
-                if len(response) < header_length:
-                    raise TimeoutError("Incomplete TMC header")
+            if len(response) < header_length:
+                raise ScopeTimeoutError(f"Incomplete TMC header for {scpi!r}")
 
-                if len(response) < total_expected:
-                    raise TimeoutError(
-                        f"Incomplete binary block: got {len(response)}/{total_expected} bytes"
-                    )
+            if len(response) < total_expected:
+                raise ScopeTimeoutError(
+                    f"Incomplete binary block for {scpi!r}: got {len(response)}/{total_expected} bytes"
+                )
 
-                terminator = response[header_length + data_length:total_expected]
-                if terminator not in (b'\n', b'\r'):
-                    raise TimeoutError(
-                        f"Invalid binary block terminator: {terminator!r}"
-                    )
+            terminator = response[header_length + data_length:total_expected]
+            if terminator not in (b'\n', b'\r'):
+                raise ScopeProtocolError(
+                    f"Invalid binary block terminator for {scpi!r}: {terminator!r}"
+                )
 
-                return response[:total_expected]
-
-            except Exception as e:
-                raise RuntimeError(f"Binary data read failed: {e}")
+            return response[:total_expected]
 
         else:
             try:
-                response = tn.read_until(b"\n", timeout)
-                if response:
-                    return response.decode("utf-8", errors='ignore').strip()
-                else:
-                    raise TimeoutError(f"No response received for query {scpi}")
-            except Exception as e:
-                raise RuntimeError(f"Text query failed for {scpi}: {e}")
+                response = tn.read_until(b"\n", clamp(deadline, timeout))
+            except EOFError as exc:
+                raise ScopeConnectionError(f"connection closed before the reply to {scpi!r}") from exc
+            except OSError as exc:
+                raise ScopeConnectionError(f"failed reading the reply to {scpi!r}: {exc}") from exc
+            # read_until returns whatever arrived when it gives up; only a full line is a reply.
+            if not response.endswith(b"\n"):
+                if tn.eof:
+                    raise ScopeConnectionError(f"connection closed mid-reply to {scpi!r} (got {response!r})")
+                raise ScopeTimeoutError(f"no complete reply to {scpi!r} (got {response!r})")
+            return response.decode("utf-8", errors='ignore').strip()
 
     else:
-        try:
-            tn.write((scpi + "\n").encode("utf-8"))
-            # Short settling delay for commands that change scope state. The
-            # patterns are matched against the upper-cased SCPI string, so they
-            # must themselves be upper-case (the original mixed-case patterns
-            # never matched). :WAVeform:SOURce / :WAVeform:MODE / :WAVeform:FORMat
-            # are included because the next :WAVeform: query/read (e.g.
-            # :WAVeform:YREFerence?, :WAVeform:DATA?) depends on them having taken
-            # effect; :WAVeform:STARt / :WAVeform:STOP are left out to keep reads fast.
-            if any(cmd in scpi.upper() for cmd in (
-                ':TRIGGER:', ':ACQUIRE:', ':CHANNEL:', ':TIMEBASE:',
-                ':WAVEFORM:SOURCE', ':WAVEFORM:MODE', ':WAVEFORM:FORMAT',
-            )):
-                time.sleep(0.05)
-            return ""
-        except Exception as e:
-            return "command error"
+        _send(tn, scpi, deadline)
+        # Short settling delay for commands that change scope state.
+        if any(cmd in scpi.upper() for cmd in (
+            ':TRIGGER:', ':ACQUIRE:', ':CHANNEL:', ':TIMEBASE:',
+            ':WAVEFORM:SOURCE', ':WAVEFORM:MODE', ':WAVEFORM:FORMAT',
+        )):
+            sleep(deadline, 0.05)
+        return ""
 
 
 def tmc_header_bytes(buff):
@@ -195,8 +216,7 @@ def get_memory_depth(tn):
     :ACQuire:MDEPth? is the authoritative record length the waveform read batches
     over, so a bad/empty reply must NOT be papered over with a guessed default --
     that would make the caller read the wrong number of points and report success.
-    Raises ValueError on an empty or non-numeric reply; the caller
-    (``RigolDHO800.memory_depth``) turns that into a RigolScopeError.
+    Raises ValueError on an empty or non-numeric reply.
     """
     response = command(tn, ':ACQuire:MDEPth?').strip()
     if not response:
