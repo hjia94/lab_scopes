@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lab-scopes"
-version = "0.4.0"
+version = "0.4.1"
 description = "Reusable oscilloscope drivers and offline readers for lab data."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,6 +21,8 @@ classifiers = [
 ]
 dependencies = [
   "numpy",
+  # zoneinfo has no system tz database on Windows
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.urls]

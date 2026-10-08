@@ -87,6 +87,13 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
 
 ---
 
+## What's new in 0.4.1
+
+- **Trigger timestamps fixed.** `wavedesc_trigger_timestamp()` now reads the
+  scope's WAVEDESC clock fields as LA local time (`SCOPE_TIMEZONE`, override
+  with `tz=`) instead of UTC, so it returns a true epoch. Earlier releases were
+  7 h (PDT) / 8 h (PST) early; differences between scopes were unaffected.
+
 ## What's new in 0.4.0
 
 - **Sequence / segment acquisition is back.** LeCroy multi-segment captures
