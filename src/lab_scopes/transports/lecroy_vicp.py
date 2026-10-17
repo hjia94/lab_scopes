@@ -76,6 +76,8 @@ class LeCroyVICPTransport:
         try:
             self._sock = socket.create_connection((self.host, self.port), timeout=self._timeout)
             self._sock.settimeout(self._timeout)
+            # Each VICP frame is one sendall; with Nagle on, a write following an unanswered write waits for the scope's delayed ACK (~200 ms).
+            self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except OSError as exc:
             raise ScopeConnectionError(f"cannot connect to LeCroy scope at {self.host}:{self.port}: {exc}") from exc
 

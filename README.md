@@ -87,6 +87,12 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
 
 ---
 
+## What's new in 0.4.2
+
+- **Faster LeCroy connect.** `LeCroyScope(..., n_channels=4)` skips channel-count
+  detection, which could cost a full socket timeout. The VICP socket now sets
+  `TCP_NODELAY`, which removes ~200 ms stalls on back-to-back writes.
+
 ## What's new in 0.4.1
 
 - **Trigger timestamps fixed.** `wavedesc_trigger_timestamp()` now reads the

@@ -3,7 +3,7 @@
 Covers the init-time logic:
   * _detect_channel_count -- authoritative ``Acquisition.Channels`` VBS query,
     with a clean-probe (``C1..C8`` + ``*CLS`` per probe) fallback for firmware
-    that does not answer it,
+    that does not answer it, and the ``n_channels=`` bypass that skips it,
   * channel-count-bounded trace discovery (valid_trace_names),
   * displayed_channels / validate_channel honoring the detected count,
   * robustness: a connection drop during detection is fatal; an unavailable /
@@ -181,6 +181,25 @@ def test_probe_fallback_4ch_survives_prelatched_error():
     scope, _ = _make(n_channels=4, channels_reply="", prelatched_err=True)
     assert scope.n_channels == 4
     assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
+
+
+def test_explicit_n_channels_skips_detection():
+    t = FakeTransport(n_channels=4)
+    scope = LeCroyScope("1.2.3.4", verbose=False, transport=t, n_channels=4)
+    assert scope.n_channels == 4
+    assert scope.channel_names == ("C1", "C2", "C3", "C4")
+    assert scope.valid_trace_names == ("C1", "C2", "C3", "C4")
+    assert not any("Acquisition.Channels" in w for w in t.writes)
+    assert "C5:TRACE?" not in t.writes
+
+
+@pytest.mark.parametrize("bad", [0, 1, 3, 5, 16, "4"])
+def test_invalid_n_channels_raises_before_connect(bad):
+    t = FakeTransport(n_channels=4)
+    with pytest.raises(ValueError):
+        LeCroyScope("1.2.3.4", verbose=False, transport=t, n_channels=bad)
+    assert not t.connected
+    assert t.writes == []
 
 
 def test_detect_connection_drop_propagates():
