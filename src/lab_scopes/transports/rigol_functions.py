@@ -184,6 +184,13 @@ def _pending(tn):
     return bool(ready)
 
 
+# resync timing. The DHO804 answers a query in about 25 ms.
+RESYNC_QUIET_S = 0.1      # no bytes for this long after a marker line: nothing stale is still coming
+RESYNC_JAM_PROBE_S = 1.0  # no reply to *IDN? for this long: send a second *IDN? to test for a held reply
+RESYNC_JAM_RELEASE_S = 0.2   # the probe released a reply this soon: possibly held
+RESYNC_JAM_CONFIRM_S = 1.5   # ... and no second reply followed for this long: held
+
+
 def resync(tn, timeout=15, deadline=None, marker=IDN_MARKER):
     """Bring a new connection in step with the scope; return ``(idn, discarded_bytes)``.
 
@@ -194,10 +201,17 @@ def resync(tn, timeout=15, deadline=None, marker=IDN_MARKER):
     1. discard whatever is already pending, without waiting;
     2. send ``*IDN?`` and discard incoming bytes until a line containing ``marker``
        arrives. The text is matched rather than the first line, because leftover
-       binary data can contain ``\n``. If more bytes are already pending once a marker
-       line is complete (a stale ``*IDN?`` reply followed by this one), keep reading
-       and take the last marker line;
-    3. raise ``ScopeProtocolError`` if no marker line arrives within ``timeout``
+       binary data can contain ``\n``;
+    3. once a marker line is complete, keep reading until nothing arrives for
+       ``RESYNC_QUIET_S`` and take the last marker line. A stale ``*IDN?`` reply can
+       arrive first, with this connection's reply about 25 ms behind it; accepting the
+       first would leave every later reply one behind;
+    4. if nothing at all arrives within ``RESYNC_JAM_PROBE_S``, send a second ``*IDN?``.
+       If one marker line then arrives at once and no second one follows within
+       ``RESYNC_JAM_CONFIRM_S``, the scope is holding each reply until the next input
+       arrives (seen on port 5555 after many rapid connect/close cycles; only
+       a power cycle cleared it): raise ``ScopeProtocolError`` saying so;
+    5. raise ``ScopeProtocolError`` if no marker line arrives within ``timeout``
        (``ScopeTimeoutError`` if nothing arrived at all, or the deadline ran out).
 
     Reads bypass telnetlib (see ``_raw_socket_recv``); its buffers are empty afterwards.
@@ -212,23 +226,43 @@ def resync(tn, timeout=15, deadline=None, marker=IDN_MARKER):
             discarded += len(chunk)
 
         _send(tn, '*IDN?', deadline)
+        sent_at = time.monotonic()
+        probed_at = None
+        first_marker_at = None
 
         buf = bytearray()
         received = 0
-        end = time.monotonic() + timeout
+        end = sent_at + timeout
+        last_data = sent_at
         while True:
+            now = time.monotonic()
             i = buf.rfind(marker)
             if i >= 0:
                 j = buf.find(b"\n", i)
-                if j >= 0 and not _pending(tn):
-                    idn = bytes(buf[i:j]).decode("utf-8", errors="ignore").strip()
-                    return idn, discarded + received - (len(buf) - i)
+                if j >= 0:
+                    if first_marker_at is None:
+                        first_marker_at = now
+                    quiet = RESYNC_QUIET_S if probed_at is None else RESYNC_JAM_CONFIRM_S
+                    if now - last_data >= quiet:
+                        # Probed, and the probe released exactly one reply: the scope holds
+                        # each reply until the next input. Two replies: it was only slow.
+                        if (probed_at is not None and buf.count(marker) == 1
+                                and first_marker_at - probed_at <= RESYNC_JAM_RELEASE_S):
+                            raise ScopeProtocolError(
+                                "the scope sends each reply only after the next command arrives "
+                                "(port 5555 jammed; power-cycle the scope)"
+                            )
+                        idn = bytes(buf[i:j]).decode("utf-8", errors="ignore").strip()
+                        return idn, discarded + received - (len(buf) - i)
             else:
                 # Keep only a tail that could hold the start of a split marker.
                 keep = len(marker) - 1
                 if len(buf) > keep:
                     del buf[:len(buf) - keep]
-            left = end - time.monotonic()
+            if received == 0 and probed_at is None and now - sent_at >= RESYNC_JAM_PROBE_S:
+                _send(tn, '*IDN?', deadline)
+                probed_at = time.monotonic()
+            left = end - now
             if left <= 0:
                 if received == 0:
                     raise ScopeTimeoutError("no reply to *IDN? on connect")
@@ -236,9 +270,11 @@ def resync(tn, timeout=15, deadline=None, marker=IDN_MARKER):
                     f"no {marker.decode()!r} reply to *IDN? on connect within {timeout:g} s "
                     f"({discarded + received} other bytes discarded)"
                 )
-            chunk = _raw_socket_recv(tn, 65536, poll_timeout=clamp(deadline, min(left, 0.05)))
-            buf += chunk
-            received += len(chunk)
+            chunk = _raw_socket_recv(tn, 65536, poll_timeout=clamp(deadline, min(left, 0.02)))
+            if chunk:
+                buf += chunk
+                received += len(chunk)
+                last_data = time.monotonic()
     except socket.timeout as exc:
         raise ScopeTimeoutError("timed out resynchronising on connect") from exc
     except OSError as exc:

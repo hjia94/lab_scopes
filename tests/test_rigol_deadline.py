@@ -505,3 +505,43 @@ def test_no_idn_line_raises_protocol_error_and_closes():
             tn.close()
     finally:
         server.close()
+
+
+STALE_IDN = b"RIGOL TECHNOLOGIES,DHO804,DHO8A000000001,STALE\n"
+
+
+def test_late_reply_after_stale_idn_line_is_taken(fake):
+    # Bobby 2026-11-25: a stale *IDN? line arrived alone, this connection's reply ~24 ms later.
+    def stale_then_real(conn):
+        conn.sendall(STALE_IDN)
+        time.sleep(0.03)
+        conn.sendall(IDN)
+    server = fake({**NEXT_SCRIPT, "*IDN?": stale_then_real})
+    with connect(server, Deadline(5.0)) as scope:
+        assert scope.stale_bytes_discarded == len(STALE_IDN)
+        assert_in_step(scope, server)
+
+
+def test_reply_held_until_next_input_raises_clear_error(fake):
+    from lab_scopes.errors import ScopeProtocolError
+    calls = []
+
+    def held(conn):  # each reply goes out only when the next input arrives
+        calls.append(1)
+        if len(calls) == 2:
+            conn.sendall(IDN)
+    server = fake({"*IDN?": held})
+    with pytest.raises(ScopeProtocolError, match="power-cycle"):
+        connect(server, Deadline(5.0))
+    assert server.lines() == ["*IDN?", "*IDN?"]
+    assert server.closed.wait(1.0)
+
+
+def test_slow_idn_reply_is_not_mistaken_for_a_jam(fake):
+    def slow(conn):
+        time.sleep(1.1)
+        conn.sendall(IDN)
+    server = fake({**NEXT_SCRIPT, "*IDN?": slow})
+    with connect(server, Deadline(5.0)) as scope:
+        assert scope.idn == IDN.decode().strip()
+        assert scope.trigger_status() == "STOP"
