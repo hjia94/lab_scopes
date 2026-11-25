@@ -157,10 +157,12 @@ def command(tn, scpi, timeout=15, binary_data=False, deadline=None):
 
     else:
         _send(tn, scpi, deadline)
-        # Short settling delay for commands that change scope state.
+        # Short settling delay for commands that change acquisition state. None for
+        # :WAVeform:SOURce/MODE/FORMat: SCPI runs commands in order on this connection,
+        # so the next query already sees the new setting (bench-checked by comparing
+        # :WAVeform:PREamble? read right after a source switch, tests/test_rigol_scope_real.py).
         if any(cmd in scpi.upper() for cmd in (
             ':TRIGGER:', ':ACQUIRE:', ':CHANNEL:', ':TIMEBASE:',
-            ':WAVEFORM:SOURCE', ':WAVEFORM:MODE', ':WAVEFORM:FORMAT',
         )):
             sleep(deadline, 0.05)
         return ""

@@ -1,7 +1,6 @@
 """Real-hardware bench test for RigolDHO800 (firmware 00.01.05, up to 25M depth).
 
-Validates the full-memory-depth, 12-bit (WORD) acquisition path against a real
-DHO800. Every test is skipped unless SCOPE_IP (or RIGOL_SCOPE_IP) is set below. Set the panel Mem Depth
+Validates the full-memory-depth WORD acquisition path against a real DHO800. Every test is skipped unless SCOPE_IP (or RIGOL_SCOPE_IP) is set below. Set the panel Mem Depth
 on the scope, then run; the length check confirms the driver returns exactly that
 many points.
 
@@ -14,9 +13,14 @@ across runs (or set EXPECT_MDEPTH to assert a specific depth).
 
 What it checks (per displayed analog channel):
   - acquire returns len == :ACQuire:MDEPth? (full record, no trim/pad/truncation)
-  - WORD read is 12-bit: raw dtype uint16, codes span 0..4095 with >256 distinct
-    values (proves we are NOT silently getting 8-bit data), and a smooth input
-    yields a smooth raw array (endianness sanity)
+  - WORD read is finer than BYTE: raw dtype uint16 with >256 distinct codes (proves
+    we are NOT silently getting 8-bit data) and no more than 4096. On the DHO804 the
+    codes sit around YREFerence 32768 (about 15,600..50,500, ~750 unevenly spaced
+    levels per channel), not 0..4095. A smooth input yields a smooth raw array
+    (endianness sanity)
+  - :WAVeform:PREamble? gives exactly the six :WAVeform:X*?/Y*? values in MAXimum
+    mode, also when read right after a source switch (no settle delay)
+  - read_channels returns the same arrays and metadata as one read_channel per channel
   - WORD voltage approximates the BYTE read of the same trace (cross-check)
   - the on-screen window is locatable within the full record (screen-slice report)
   - a fed ramp is monotonic across the full window (no dropped/duplicated chunks)
@@ -97,14 +101,14 @@ def test_full_record_length(scope):
 
 @_real
 def test_word_is_12bit(scope):
-    """WORD carries >8-bit resolution, packed in the DHO804's 16-bit code space.
+    """WORD carries more than 8 bits, in the DHO804's 16-bit code space.
 
-    The DHO804 does NOT return raw 0..4095 codes: it scales the 12-bit ADC code
-    into the uint16 range, centered on :WAVeform:YREFerence? (observed 32768 =
-    2**15). The driver converts using the scope-reported y_reference / y_increment,
-    so voltage is correct regardless of the code packing. Here we confirm the read
-    carries genuine 12-bit resolution: more than 8-bit (so we are not silently
-    getting BYTE data) but no more than 12-bit worth of distinct levels.
+    The DHO804 does NOT return 0..4095 codes. WORD values sit around
+    :WAVeform:YREFerence? (32768): about 15,600..50,500 on the bench, with about
+    750 unevenly spaced levels per channel. The driver converts using the
+    scope-reported y_reference / y_increment, so voltage is correct regardless of
+    the code packing. Here we confirm the read has more levels than BYTE (so we are
+    not silently getting 8-bit data) and no more than a 12-bit ADC can produce.
     """
     _armed_stop(scope)
     for ch in _displayed(scope):
@@ -228,3 +232,43 @@ def test_deep_read_timing(scope, capsys):
     print(f"\n{ch}: read {w.points} pts ({mb:.1f} MB WORD) in {dt:.2f} s "
           f"({mb / dt:.1f} MB/s)")
     assert w.points > 0
+
+
+@_real
+def test_preamble_matches_separate_queries(scope, capsys):
+    """:WAVeform:PREamble? equals the six :WAVeform:X*?/Y*? queries in MAXimum/Stop mode.
+
+    read_channels takes its calibration from the preamble; the 2026-05 notes (fw 00.01.03)
+    say the preamble read wrong values in MAX mode, so this must hold on the bench firmware.
+    If it fails, set RigolDHO800.calibration_from_preamble = False and report it.
+    Channels are visited forward then backward, and each preamble is read right after
+    :WAVeform:SOURce/MODE/FORMat with no settle delay, so a source switch that had not
+    taken effect would show as the previous channel's values.
+    """
+    _armed_stop(scope)
+    chans = _displayed(scope)
+    for fmt in ("WORD", "BYTE"):
+        for ch in list(chans) + list(reversed(chans)):
+            scope._select_waveform(ch, fmt)
+            pre = scope._calibration_from_preamble(fmt)
+            sep = scope._calibration_from_queries()
+            print(f"\n{ch} {fmt}: preamble {pre}\n{ch} {fmt}: queries  {sep}")
+            assert pre == sep, f"{ch} {fmt}: PREamble {pre} != separate queries {sep}"
+
+
+@_real
+def test_read_channels_matches_read_channel(scope, capsys):
+    """read_channels returns the same arrays and metadata as one read_channel per channel."""
+    _armed_stop(scope)
+    chans = _displayed(scope)
+    t0 = time.time()
+    together = scope.read_channels(chans)
+    dt = time.time() - t0
+    print(f"\nread_channels({list(chans)}): {dt:.2f} s for {together[chans[0]].points} pts each")
+    for ch in chans:
+        alone = scope.read_channel(ch)
+        both = together[ch]
+        assert both.raw.tobytes() == alone.raw.tobytes(), f"{ch}: raw codes differ"
+        assert both.voltage.tobytes() == alone.voltage.tobytes(), f"{ch}: voltage differs"
+        assert both.time.tobytes() == alone.time.tobytes(), f"{ch}: time differs"
+        assert both.metadata == alone.metadata, f"{ch}: {both.metadata} != {alone.metadata}"

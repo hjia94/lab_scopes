@@ -16,10 +16,23 @@ Validated against: **DHO800 Series Programming Guide (EN)**,
 Hardware the history was validated on: **DHO804, firmware 00.01.03**.
 
 **12-bit / WORD acquisition validated on firmware 00.01.05** (2026-06-19, bench test).
-`read_channel` now defaults to `:WAVeform:FORMat WORD` (2 bytes/point, full 12-bit
-ADC code parsed as little-endian `<u2`); the batched read counts STARt/STOP in points
-while DATA? returns bytes. Endianness, 2-bytes/point, 12-bit range, and full-depth
-reassembly confirmed on hardware. BYTE remains callable for cross-checks.
+`read_channel` now defaults to `:WAVeform:FORMat WORD` (2 bytes/point, parsed as
+little-endian `<u2`); the batched read counts STARt/STOP in points while DATA? returns
+bytes. Endianness, 2-bytes/point, >8-bit resolution, and full-depth reassembly confirmed
+on hardware. BYTE remains callable for cross-checks.
+
+WORD values are **not** 12-bit codes (0..4095): on the DHO804 they sit around
+`:WAVeform:YREFerence?` = 32768, spanning about 15,600..50,500 with about 750 unevenly
+spaced levels per channel (Bobby bench, 2026-11-25). The conversion to volts
+(`(raw - YORigin - YREFerence) * YINCrement`) was always right; only the wording was.
+
+**0.5.0 (2026-11): calibration from `:WAVeform:PREamble?` again.** A RAW-mode preamble on
+00.01.05 gave the same yinc/yorig as the separate queries; `read_channels` now takes the
+six values from one preamble (its `<points>` field is still ignored) and
+`tests/test_rigol_scope_real.py::test_preamble_matches_separate_queries` checks the two
+agree in MAXimum/Stop mode. If that fails, set `RigolDHO800.calibration_from_preamble =
+False`. The 50 ms settle delays after `:WAVeform:SOURce/MODE/FORMat` were removed in the
+same release (SCPI runs commands in order).
 
 ---
 

@@ -11,8 +11,8 @@
 >   priority — a short/partial read must *fail*, never return a quietly-trimmed array.
 > - **12-bit vertical resolution is REQUIRED** (user, 2026-06-19). The DHO800 is a
 >   12-bit ADC; the current BYTE (8-bit) read throws away 4 bits / 16× of vertical
->   resolution. Acquisition MUST use **WORD format** (2 bytes/point, full 12-bit code
->   in a 16-bit word, §3.28.3). BYTE is no longer acceptable for data acquisition.
+>   resolution. Acquisition MUST use **WORD format** (2 bytes/point, §3.28.3; the
+>   uint16 values sit around YREFerence 32768, not 0..4095). BYTE is no longer acceptable for data acquisition.
 >   *This promotes WORD support from "deferred" to a blocking deliverable (§3.8, §6).*
 >
 > **Validation target firmware: 00.01.05** (`00.01.05.00.02`, 2026/05/19 — current
@@ -75,7 +75,9 @@ return a `Waveform` where:
 2. **No duplicated, dropped, or zero-padded samples** — batches are strictly
    consecutive (`start += got`) and cover `1..MDEPth` with no gap/overlap.
 3. **Full 12-bit resolution via WORD format** — read `:WAVeform:FORMat WORD`
-   (2 bytes/point, §3.28.3); parse as little-endian `uint16` carrying the 12-bit code.
+   (2 bytes/point, §3.28.3); parse as little-endian `uint16`. The values are not 12-bit codes:
+   on the DHO804 they sit around YREFerence 32768 (about 15,600..50,500, ~750 unevenly
+   spaced levels per channel).
    BYTE (8-bit) is not acceptable — it discards 4 bits of the 12-bit ADC.
 4. **0xFF / 0xFFFF byte values survive** — binary read bypasses telnetlib IAC
    (`_raw_socket_recv`); with WORD, *either* byte of a 16-bit word can be 0xFF, so the
@@ -215,7 +217,7 @@ wait_until_stopped()            # blocking poll on :TRIGger:STATus? == STOP  (c7
 # 2. Select source and the full-depth, full-resolution read mode
 :WAVeform:SOURce CHANnel<n>
 :WAVeform:MODE   MAXimum        # Stop-state => full internal record (§3.28.2)
-:WAVeform:FORMat WORD           # 2 bytes/pt, full 12-bit code (§3.28.3) — REQUIRED
+:WAVeform:FORMat WORD           # 2 bytes/pt, uint16 around YREF 32768 (§3.28.3) — REQUIRED
 
 # 3. Authoritative length + calibration, read ONCE from the scope (AFTER :FORMat WORD)
 N = :ACQuire:MDEPth?            # the only true sample count (§3.3.2) — raise if unreadable
@@ -232,7 +234,7 @@ for windows of (learned cap, in points) until N:
 # raise if total points < N  (never return a short array as success)
 
 # 5. Parse + convert (WORD: little-endian uint16, verify endian on hardware)
-raw     = frombuffer(payload, dtype='<u2')        # 12-bit code in 16-bit word
+raw     = frombuffer(payload, dtype='<u2')        # ~15,600..50,500 around YREFerence 32768
 voltage = (raw - YORigin - YREFerence) * YINCrement
 time    = XORigin + (i - XREFerence) * XINCrement
 ```
@@ -294,8 +296,8 @@ per run):
 5. **WORD / 12-bit integrity** (the headline accuracy requirement). Confirm:
    - `:WAVeform:FORMat WORD` is set and the read returns **2 bytes/point**
      (`declared_bytes == 2 × MDEPth`).
-   - parsed as `<u2`, codes span the **12-bit** range (0..4095, not 0..255) — feed a
-     ramp/sine and check the histogram uses >256 distinct codes (proves you're not
+   - parsed as `<u2` — feed a ramp/sine and check the histogram uses >256 distinct
+     codes (bench: values around YREFerence 32768, not 0..4095) (proves you're not
      silently getting 8-bit data).
    - **endian check:** a smooth input must yield a smooth `raw` array; a byte-swap
      shows up as high-frequency garbage. Compare against the same trace in BYTE to
