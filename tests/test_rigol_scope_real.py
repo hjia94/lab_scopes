@@ -1,7 +1,7 @@
 """Real-hardware bench test for RigolDHO800 (firmware 00.01.05, up to 25M depth).
 
 Validates the full-memory-depth, 12-bit (WORD) acquisition path against a real
-DHO800. Every test is skipped unless SCOPE_IP is set below. Set the panel Mem Depth
+DHO800. Every test is skipped unless SCOPE_IP (or RIGOL_SCOPE_IP) is set below. Set the panel Mem Depth
 on the scope, then run; the length check confirms the driver returns exactly that
 many points.
 
@@ -35,6 +35,7 @@ MANUAL probe-ratio bench step (gap 3.7, no automated check -- run once on 00.01.
 --------------------------------------------------------------------------------
 """
 
+import os
 import time
 
 import numpy as np
@@ -44,16 +45,18 @@ from lab_scopes.rigol import RigolDHO800
 
 
 # === user configuration =====================================================
-SCOPE_IP = "192.168.7.59"          # set to "192.168.7.59" to enable this suite
-EXPECT_MDEPTH = 1_000_000     # set to an int (e.g. 25_000_000) to assert the panel depth
-SHOW_PLOT = True        # True: plot full record + highlighted on-screen slice
+# Set here, or from the environment without editing this file:
+#   RIGOL_SCOPE_IP=<address> RIGOL_EXPECT_MDEPTH=1000000 pytest tests/test_rigol_scope_real.py -v -s
+SCOPE_IP = os.environ.get("RIGOL_SCOPE_IP", "")  # empty: every test is skipped
+EXPECT_MDEPTH = int(os.environ["RIGOL_EXPECT_MDEPTH"]) if os.environ.get("RIGOL_EXPECT_MDEPTH") else None  # int asserts the panel depth
+SHOW_PLOT = os.environ.get("RIGOL_SHOW_PLOT") == "1"  # True: plot full record + highlighted on-screen slice
 # ============================================================================
 
 TRIGGER_TIMEOUT_S = 30.0
 
 
 _real = pytest.mark.skipif(
-    not SCOPE_IP, reason="set SCOPE_IP in this file to test a real Rigol scope"
+    not SCOPE_IP, reason="set RIGOL_SCOPE_IP (or SCOPE_IP in this file) to test a real Rigol scope"
 )
 
 
