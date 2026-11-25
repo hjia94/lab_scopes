@@ -1,24 +1,24 @@
-"""Real-hardware shot timing for RigolDHO800: before PR #4, PR #4, PR #4 + TCP_NODELAY.
+"""Real-hardware shot timing for RigolDHO800, on one stopped record (no trigger needed).
 
-Skipped unless RIGOL_SCOPE_IP is set. Run on its own, after test_rigol_scope_real.py:
+Skipped unless RIGOL_SCOPE_IP is set. Run on its own:
 
     RIGOL_SCOPE_IP=<address> pytest tests/test_rigol_timing_real.py -v -s
 
-Each shot is one connection, as interf_raw.rigol_read does it: connect, wait for a real
-trigger (:SINGle, excluded from the times), :STOP, read C1 and C2, :RUN, close. Shots are
-paced by the scope's triggers, like normal acquisition; there is no rapid connect loop.
-RIGOL_TIMING_SHOTS (default 3) shots per variant, so 3 x 3 = 9 connections.
+Sends :STOP once, so every read sees the same record (the last one captured), then reads
+C1 and C2 RIGOL_TIMING_ROUNDS times (default 2) per variant, one connection per read and
+RIGOL_TIMING_GAP_S (default 3 s) between connections, as interf_raw.rigol_read connects.
+Sends :RUN at the end. Six connections in all with the defaults; no rapid connect loop.
 
 Variants:
-    old     two read_channel calls, six calibration queries, the 50 ms settle delays
-            after :WAVeform:SOURce/MODE/FORMat put back (the v0.4.x command sequence)
-    new     read_channels (this release)
-    new+nd  read_channels with TCP_NODELAY on the socket (not in the driver yet; the
-            LeCroy transport sets it to avoid stalls on back-to-back writes)
+    old         v0.4.x sequence: two read_channel calls, six calibration queries, the 50 ms
+                settle delays after :WAVeform:SOURce/MODE/FORMat, Nagle on
+    new-nagle   read_channels with Nagle on (PR #4 as first benched, 2afbe0e)
+    new         read_channels with TCP_NODELAY (the driver default)
+
+Asserts every read returns the same raw codes and metadata, and new is not slower than old.
 """
 
 import os
-import socket
 import statistics
 import time
 
@@ -28,9 +28,10 @@ import lab_scopes.rigol.dho800 as dho
 from lab_scopes.rigol import RigolDHO800
 
 SCOPE_IP = os.environ.get("RIGOL_SCOPE_IP", "")
-SHOTS = int(os.environ.get("RIGOL_TIMING_SHOTS", "3"))
+ROUNDS = int(os.environ.get("RIGOL_TIMING_ROUNDS", "2"))
+GAP_S = float(os.environ.get("RIGOL_TIMING_GAP_S", "3"))
 CHANNELS = ["C1", "C2"]
-TRIGGER_TIMEOUT_S = 30.0
+MODES = ("old", "new-nagle", "new")
 _WAVE_SETTINGS = (":WAVEFORM:SOURCE", ":WAVEFORM:MODE", ":WAVEFORM:FORMAT")
 
 pytestmark = pytest.mark.skipif(not SCOPE_IP, reason="set RIGOL_SCOPE_IP to time a real Rigol scope")
@@ -45,46 +46,53 @@ def _with_old_settle_delays(command):
     return old_command
 
 
-def _shot(mode, monkeypatch):
-    """Returns (seconds excluding the trigger wait, seconds for the C1+C2 read)."""
+def _read(mode, monkeypatch):
+    """One connection: connect, :STOP, read C1+C2, close. Returns (connect s, read s, data)."""
     with monkeypatch.context() as m:
         if mode == "old":
             m.setattr(dho, "command", _with_old_settle_delays(dho.command))
             m.setattr(RigolDHO800, "calibration_from_preamble", False)
+        if mode in ("old", "new-nagle"):
+            m.setattr(RigolDHO800, "tcp_nodelay", False)
         t0 = time.monotonic()
-        s = RigolDHO800(SCOPE_IP, verbose=False)
-        connect_s = time.monotonic() - t0
-        try:
-            if mode == "new+nd":
-                s.tn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            s.single()
-            s.wait_until_stopped(timeout=TRIGGER_TIMEOUT_S)
+        with RigolDHO800(SCOPE_IP, verbose=False) as s:
             t1 = time.monotonic()
             s.stop()
             if mode == "old":
-                for ch in CHANNELS:
-                    s.read_channel(ch)
+                data = {ch: s.read_channel(ch) for ch in CHANNELS}
             else:
-                s.read_channels(CHANNELS)
+                data = s.read_channels(CHANNELS)
             t2 = time.monotonic()
+    return t1 - t0, t2 - t1, data
+
+
+def test_shot_timing_same_record(monkeypatch, capsys):
+    with RigolDHO800(SCOPE_IP, verbose=False) as s:
+        s.stop()
+    times = {m: [] for m in MODES}
+    reference = None
+    try:
+        for i in range(ROUNDS):
+            for mode in MODES:
+                time.sleep(GAP_S)
+                connect_s, read_s, data = _read(mode, monkeypatch)
+                times[mode].append((connect_s, read_s))
+                print(f"\nROUND {i + 1} {mode}: connect {connect_s * 1000:.0f} ms, "
+                      f"read C1+C2 {read_s:.2f} s, total {connect_s + read_s:.2f} s")
+                if reference is None:
+                    reference = data
+                for ch in CHANNELS:
+                    assert data[ch].raw.tobytes() == reference[ch].raw.tobytes(), f"{mode} {ch}: raw differs"
+                    assert data[ch].metadata == reference[ch].metadata, f"{mode} {ch}: metadata differs"
+    finally:
+        time.sleep(GAP_S)
+        with RigolDHO800(SCOPE_IP, verbose=False) as s:
             s.run()
-        finally:
-            s.close()
-        t3 = time.monotonic()
-    return connect_s + (t3 - t1), t2 - t1
-
-
-def test_shot_timing(monkeypatch, capsys):
-    modes = ("old", "new", "new+nd")
-    times = {m: [] for m in modes}
-    for i in range(SHOTS):
-        for mode in modes:
-            total, read = _shot(mode, monkeypatch)
-            times[mode].append((total, read))
-            print(f"\nSHOT {i + 1} {mode}: total {total:.2f} s, read {read:.2f} s")
-    for mode in modes:
-        totals = [t for t, _ in times[mode]]
+    for mode in MODES:
+        connects = [c for c, _ in times[mode]]
         reads = [r for _, r in times[mode]]
-        print(f"\nMEDIAN {mode}: total {statistics.median(totals):.2f} s, "
-              f"read {statistics.median(reads):.2f} s (min {min(totals):.2f}, max {max(totals):.2f})")
-    assert statistics.median(r for _, r in times["new"]) < statistics.median(r for _, r in times["old"])
+        print(f"\nMEDIAN {mode}: connect {statistics.median(connects) * 1000:.0f} ms, "
+              f"read {statistics.median(reads):.2f} s, "
+              f"total {statistics.median(c + r for c, r in times[mode]):.2f} s")
+    print(f"\n{CHANNELS}: {reference[CHANNELS[0]].points} points each, identical in every read")
+    assert statistics.median(r for _, r in times["new"]) <= statistics.median(r for _, r in times["old"])

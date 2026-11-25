@@ -545,3 +545,18 @@ def test_slow_idn_reply_is_not_mistaken_for_a_jam(fake):
     with connect(server, Deadline(5.0)) as scope:
         assert scope.idn == IDN.decode().strip()
         assert scope.trigger_status() == "STOP"
+
+
+def test_tcp_nodelay_is_set_on_connect(fake):
+    import socket as _socket
+    server = fake()
+    with connect(server) as scope:
+        assert scope.tn.sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY) != 0
+
+
+def test_tcp_nodelay_can_be_turned_off(fake, monkeypatch):
+    import socket as _socket
+    monkeypatch.setattr(RigolDHO800, "tcp_nodelay", False)
+    server = fake()
+    with connect(server) as scope:
+        assert scope.tn.sock.getsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY) == 0

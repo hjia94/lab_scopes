@@ -124,7 +124,11 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
 - **Faster Rigol multi-channel reads.** `read_channels(['C1', 'C2'])` reads
   several channels of one shot with the shared queries sent once, calibration
   from one `:WAVeform:PREamble?` per channel, and no 50 ms settle delays after
-  `:WAVeform:SOURce/MODE/FORMat`. Returned data and metadata are unchanged.
+  `:WAVeform:SOURce/MODE/FORMat`. The socket uses `TCP_NODELAY`, so a command
+  that follows another is not held for the scope's delayed ACK
+  (`RigolDHO800.tcp_nodelay = False` turns it off). Returned data and metadata
+  are unchanged. Bench (DHO804, C1+C2, 1M points WORD, before `TCP_NODELAY`):
+  1.80 s per shot down to 1.31 s.
 - **Rigol error handling.** Timeouts, lost connections and malformed replies
   raise distinct `ScopeError` types instead of being retried silently or
   returned as partial data. A timed-out query no longer returns its default

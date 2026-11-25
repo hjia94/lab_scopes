@@ -49,6 +49,7 @@ bench test compares both). Conversion is the literal guide formula:
 Public surface:
     RigolDHO800(ip, port=5555, timeout=5.0, verbose=True, deadline=None)   # context manager
         deadline                         Deadline capping every wait; replaceable between operations
+        tcp_nodelay                      class attribute, True: no Nagle delay between commands
         idn / model
         run() / stop() / single() / set_sweep(mode)
         trigger_status()                 -> 'TD'|'WAIT'|'RUN'|'AUTO'|'STOP'
@@ -77,6 +78,7 @@ everything until the ``RIGOL TECHNOLOGIES,`` line. ``stale_bytes_discarded`` say
 many bytes were skipped.
 """
 
+import socket
 import time
 from dataclasses import dataclass
 
@@ -130,6 +132,12 @@ class RigolDHO800:
     # Class-level so instances built without __init__ (test fakes) have no deadline.
     deadline = None
 
+    # TCP_NODELAY on the socket. With Nagle on, a write that follows an unanswered write
+    # (:WAVeform:SOURce, MODE, FORMat, STARt, STOP) waits for the scope's delayed ACK.
+    # Bench 2026-11-25: about 24 ms per command, ~0.39 s of a 1.17 s C1+C2 read. The
+    # LeCroy transport sets it for the same reason. False restores the v0.4.x socket.
+    tcp_nodelay = True
+
     # -- construction / lifetime -------------------------------------------- #
 
     def __init__(self, ip, port=5555, timeout=5.0, verbose=True, deadline=None):
@@ -153,6 +161,12 @@ class RigolDHO800:
         # The connect may have used a deadline-shortened timeout; sends keep the full ceiling.
         self.tn.timeout = timeout
         self.tn.sock.settimeout(timeout)
+        if self.tcp_nodelay:
+            try:
+                self.tn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError as exc:
+                self.close()
+                raise ScopeConnectionError(f"cannot set TCP_NODELAY on {ip}:{port}: {exc}") from exc
 
         # Resynchronise: a reply cut off on an earlier connection arrives on this one.
         try:
