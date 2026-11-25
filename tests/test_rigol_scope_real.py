@@ -53,6 +53,7 @@ SHOW_PLOT = os.environ.get("RIGOL_SHOW_PLOT") == "1"  # True: plot full record +
 # ============================================================================
 
 TRIGGER_TIMEOUT_S = 30.0
+MIN_SPAN_DIV = 1.0  # test_word_is_12bit skips channels whose trace spans less than this
 
 
 _real = pytest.mark.skipif(
@@ -66,7 +67,11 @@ def scope():
     try:
         yield s
     finally:
-        s.close()
+        try:
+            if s.connected:
+                s.run()  # the tests arm with :SINGle; leave the scope running
+        finally:
+            s.close()
 
 
 def _armed_stop(s):
@@ -107,9 +112,17 @@ def test_word_is_12bit(scope):
     getting BYTE data) but no more than 12-bit worth of distinct levels.
     """
     _armed_stop(scope)
+    tested = []
     for ch in _displayed(scope):
         w = scope.read_channel(ch, fmt='WORD')
         assert w.raw.dtype == np.uint16, f"{ch}: raw dtype {w.raw.dtype}, expected uint16"
+        span_div = float(np.ptp(w.voltage)) / w.metadata['vertical_scale']
+        if span_div < MIN_SPAN_DIV:
+            # A nearly flat trace (e.g. a trigger input between triggers) uses few
+            # codes whatever the format, so it says nothing about the resolution.
+            print(f"\n{ch}: span {span_div:.2f} div < {MIN_SPAN_DIV} div, not tested")
+            continue
+        tested.append(ch)
         distinct = np.unique(w.raw).size
         assert distinct > 256, (
             f"{ch}: only {distinct} distinct codes -- looks like 8-bit data in a "
@@ -121,6 +134,8 @@ def test_word_is_12bit(scope):
         assert distinct <= 4096, (
             f"{ch}: {distinct} distinct codes exceeds 12-bit (4096) -- not 12-bit data"
         )
+    if not tested:
+        pytest.skip(f"no displayed channel spans {MIN_SPAN_DIV} div or more; feed a signal")
 
 
 @_real

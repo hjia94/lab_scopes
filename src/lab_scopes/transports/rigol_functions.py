@@ -7,6 +7,7 @@ silently corrupt any 0xFF sample bytes.
 
 Public API:
     command()              Send a query or command; returns str or raw bytes.
+    resync()               Discard stale replies on a new connection; returns the *IDN? reply.
     tmc_header_bytes()     IEEE 488.2 TMC block header length.
     expected_data_bytes()  Data payload length declared in the TMC header.
     expected_buff_bytes()  Total expected bytes: header + data + terminator.
@@ -164,6 +165,82 @@ def command(tn, scpi, timeout=15, binary_data=False, deadline=None):
         )):
             sleep(deadline, 0.05)
         return ""
+
+
+IDN_MARKER = b"RIGOL TECHNOLOGIES,"
+
+
+def _reset_telnet_buffers(tn):
+    tn.rawq = b''
+    tn.irawq = 0
+    tn.cookedq = b''
+
+
+def _pending(tn):
+    """True when the socket has bytes (or EOF) ready right now."""
+    ready, _, _ = select.select([tn.sock], [], [], 0)
+    return bool(ready)
+
+
+def resync(tn, timeout=15, deadline=None, marker=IDN_MARKER):
+    """Bring a new connection in step with the scope; return ``(idn, discarded_bytes)``.
+
+    The DHO804 does not drop a reply that was cut off when the previous connection
+    closed: it delivers it on the next connection (a waveform block, or a small reply
+    that would put every later reply one behind). So on every connect:
+
+    1. discard whatever is already pending, without waiting;
+    2. send ``*IDN?`` and discard incoming bytes until a line containing ``marker``
+       arrives. The text is matched rather than the first line, because leftover
+       binary data can contain ``\n``. If more bytes are already pending once a marker
+       line is complete (a stale ``*IDN?`` reply followed by this one), keep reading
+       and take the last marker line;
+    3. raise ``ScopeProtocolError`` if no marker line arrives within ``timeout``
+       (``ScopeTimeoutError`` if nothing arrived at all, or the deadline ran out).
+
+    Reads bypass telnetlib (see ``_raw_socket_recv``); its buffers are empty afterwards.
+    """
+    _reset_telnet_buffers(tn)
+    discarded = 0
+    try:
+        while _pending(tn):
+            chunk = tn.sock.recv(65536)
+            if not chunk:
+                raise ScopeConnectionError("connection closed by the scope")
+            discarded += len(chunk)
+
+        _send(tn, '*IDN?', deadline)
+
+        buf = bytearray()
+        received = 0
+        end = time.monotonic() + timeout
+        while True:
+            i = buf.rfind(marker)
+            if i >= 0:
+                j = buf.find(b"\n", i)
+                if j >= 0 and not _pending(tn):
+                    idn = bytes(buf[i:j]).decode("utf-8", errors="ignore").strip()
+                    return idn, discarded + received - (len(buf) - i)
+            else:
+                # Keep only a tail that could hold the start of a split marker.
+                keep = len(marker) - 1
+                if len(buf) > keep:
+                    del buf[:len(buf) - keep]
+            left = end - time.monotonic()
+            if left <= 0:
+                if received == 0:
+                    raise ScopeTimeoutError("no reply to *IDN? on connect")
+                raise ScopeProtocolError(
+                    f"no {marker.decode()!r} reply to *IDN? on connect within {timeout:g} s "
+                    f"({discarded + received} other bytes discarded)"
+                )
+            chunk = _raw_socket_recv(tn, 65536, poll_timeout=clamp(deadline, min(left, 0.05)))
+            buf += chunk
+            received += len(chunk)
+    except socket.timeout as exc:
+        raise ScopeTimeoutError("timed out resynchronising on connect") from exc
+    except OSError as exc:
+        raise ScopeConnectionError(f"failed resynchronising on connect: {exc}") from exc
 
 
 def tmc_header_bytes(buff):

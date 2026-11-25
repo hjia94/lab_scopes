@@ -118,6 +118,10 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
   raise distinct `ScopeError` types instead of being retried silently or
   returned as partial data. A timed-out query no longer returns its default
   value, and a failed connection is closed rather than reused.
+- **Rigol resync on connect.** The DHO804 delivers a reply that was cut off on
+  one connection at the start of the next, so a new `RigolDHO800` discards
+  pending bytes and everything before its own `*IDN?` reply. Without this, later
+  replies could be one behind and still parse as valid numbers.
 
 ## What's new in 0.4.2
 

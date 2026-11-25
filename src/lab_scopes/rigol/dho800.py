@@ -61,6 +61,12 @@ ScopeConnectionError / ScopeProtocolError; device-state problems raise RigolScop
 All are ScopeError (a RuntimeError). After a transport failure the connection is closed
 and every later call raises ScopeConnectionError: port 5555 has no device clear, so a
 late reply would otherwise answer the next query. Reconnect with a new instance.
+
+Closing does not discard that late reply either: the DHO804 sends it on the NEXT
+connection (bench, fw 00.01.05). So the constructor resynchronises
+(``rigol_functions.resync``): it discards pending bytes, sends ``*IDN?`` and skips
+everything until the ``RIGOL TECHNOLOGIES,`` line. ``stale_bytes_discarded`` says how
+many bytes were skipped.
 """
 
 import time
@@ -73,6 +79,7 @@ from lab_scopes.transports.deadline import clamp, sleep
 from lab_scopes.transports.rigol_functions import (
     command,
     expected_data_bytes,
+    resync,
     tmc_header_bytes,
 )
 from lab_scopes.transports.telnetlib_receive_all import Telnet
@@ -126,6 +133,7 @@ class RigolDHO800:
 
         self.tn = None
         self.idn = ''
+        self.stale_bytes_discarded = 0
         self.manufacturer = self.model = self.serial = self.firmware = ''
 
         if self.verbose:
@@ -138,10 +146,14 @@ class RigolDHO800:
         self.tn.timeout = timeout
         self.tn.sock.settimeout(timeout)
 
-        self.idn = self._query('*IDN?')  # _io closes the connection if this raises
-        if not self.idn:
+        # Resynchronise: a reply cut off on an earlier connection arrives on this one.
+        try:
+            self.idn, self.stale_bytes_discarded = resync(self.tn, timeout=15, deadline=deadline)
+        except BaseException:
             self.close()
-            raise RigolScopeError(f"scope at {ip} did not respond to *IDN?")
+            raise
+        if self.verbose and self.stale_bytes_discarded:
+            print(f"<:> discarded {self.stale_bytes_discarded} stale bytes from an earlier connection")
         parts = [p.strip() for p in self.idn.split(',')]
         if len(parts) >= 4:
             self.manufacturer, self.model, self.serial, self.firmware = parts[:4]
