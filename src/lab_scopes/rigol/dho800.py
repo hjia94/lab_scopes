@@ -13,15 +13,18 @@ Reading a displayed channel (MAXimum mode, scope already STOPped after a real
 trigger -- §3.28.2: in the Stop state MAXimum mode returns the full captured
 memory record behind the on-screen waveform):
 
-    # scope must already be STOPped after a real trigger
+    # scope must already be STOPped after a real trigger; once per read_channels() call:
+    :TRIGger:STATus?              # STOP
+    N = :ACQuire:MDEPth?          # captured-sample count (§3.3.2)
+    :TIMebase:MAIN:SCALe? / :TIMebase:MAIN:OFFSet?
+    # then per channel:
     :WAVeform:SOURce  CHANnel<n>
     :WAVeform:MODE    MAXimum
-    :WAVeform:FORMat  WORD        # 2 bytes/point, full 12-bit ADC code (§3.28.3)
-    N = :ACQuire:MDEPth?          # captured-sample count (§3.3.2)
-    :WAVeform:XINCrement? / :WAVeform:XORigin? / :WAVeform:XREFerence?
-    :WAVeform:YINCrement? / :WAVeform:YORigin? / :WAVeform:YREFerence?
-    # then, batched until all N points are read (§3.28.5):
+    :WAVeform:FORMat  WORD        # 2 bytes/point, little-endian uint16 (§3.28.3)
+    :WAVeform:PREamble?           # format,type,points,count,xinc,xorig,xref,yinc,yorig,yref
+    # batched until all N points are read (§3.28.5):
     :WAVeform:STARt <k> ; :WAVeform:STOP <k+window-1> ; :WAVeform:DATA?  ...
+    :CHANnel<n>:SCALe? / :CHANnel<n>:OFFSet?
 
 The DHO firmware caps a single ``:WAVeform:DATA?`` at a per-transfer point count
 that varies by model, so ``read_channel`` reads in batches: ``:WAVeform:STARt`` /
@@ -29,12 +32,16 @@ that varies by model, so ``read_channel`` reads in batches: ``:WAVeform:STARt`` 
 from the first chunk), until the whole ``:ACQuire:MDEPth?`` record is read --
 adjacent blocks are consecutive (§3.28.5).
 
-Calibration is read straight off the scope using the individual ``:WAVeform:``
-parameter queries the guide names as the "Related Commands" for ``:WAVeform:DATA?``
-(p.404) -- *not* the lumped ``:WAVeform:PREamble?``. In RAW/MAX-Stop mode
-YINCrement and YORigin have no closed form ("related to the VerticalScale of the
-internal waveform", §3.28.9/.10), so they must come from the scope. Conversion
-is the literal guide formula:
+Calibration is read straight off the scope, after SOURce/MODE/FORMat are set. In
+RAW/MAX-Stop mode YINCrement and YORigin have no closed form ("related to the
+VerticalScale of the internal waveform", §3.28.9/.10), so they must come from the
+scope. By default one ``:WAVeform:PREamble?`` supplies all six values; its
+``<points>`` field is never used (it follows the session-persistent
+``:WAVeform:POINts`` setting, not the record -- ``:ACQuire:MDEPth?`` is the record
+length). Set ``RigolDHO800.calibration_from_preamble = False`` to use the six
+individual ``:WAVeform:X*?/Y*?`` queries instead (the pre-0.5 path; the 2026-05
+firmware 00.01.03 notes say the preamble read wrong values in MAX mode, so the
+bench test compares both). Conversion is the literal guide formula:
 
     voltage[i] = (raw[i] - y_origin - y_reference) * y_increment   # p.404
     time[i]    = x_origin + (i - x_reference) * x_increment        # §3.28.6/.7/.8
@@ -42,6 +49,7 @@ is the literal guide formula:
 Public surface:
     RigolDHO800(ip, port=5555, timeout=5.0, verbose=True, deadline=None)   # context manager
         deadline                         Deadline capping every wait; replaceable between operations
+        tcp_nodelay                      class attribute, True: no Nagle delay between commands
         idn / model
         run() / stop() / single() / set_sweep(mode)
         trigger_status()                 -> 'TD'|'WAIT'|'RUN'|'AUTO'|'STOP'
@@ -51,7 +59,8 @@ Public surface:
         sample_rate()                    -> float  (:ACQuire:SRATe?)
         vertical_scale(ch) / vertical_offset(ch)
         timebase_scale() / timebase_offset()
-        read_channel(ch, fmt='WORD')     -> Waveform   (WORD=12-bit, BYTE=8-bit)
+        read_channels(chs, fmt='WORD')   -> {ch: Waveform}   (one shot, several channels)
+        read_channel(ch, fmt='WORD')     -> Waveform   (read_channels for one channel)
         screen_png(path)                 -> path   (:DISPlay:DATA? PNG dump)
 
     Waveform        dataclass: channel, raw, voltage, time, metadata
@@ -69,6 +78,7 @@ everything until the ``RIGOL TECHNOLOGIES,`` line. ``stale_bytes_discarded`` say
 many bytes were skipped.
 """
 
+import socket
 import time
 from dataclasses import dataclass
 
@@ -99,7 +109,7 @@ class Waveform:
     """One acquired trace plus its calibration metadata."""
 
     channel: str             # 'CHANnel1' .. 'CHANnel4'
-    raw: np.ndarray          # ADC codes: uint8 (BYTE) or uint16 (WORD)
+    raw: np.ndarray          # scope codes: uint8 (BYTE) or little-endian uint16 (WORD)
     voltage: np.ndarray      # volts, float64, same length as raw
     time: np.ndarray         # seconds relative to trigger, float64, same length
     metadata: dict           # derived acquisition metadata
@@ -121,6 +131,12 @@ class RigolDHO800:
 
     # Class-level so instances built without __init__ (test fakes) have no deadline.
     deadline = None
+
+    # TCP_NODELAY on the socket. With Nagle on, a write that follows an unanswered write
+    # (:WAVeform:SOURce, MODE, FORMat, STARt, STOP) waits for the scope's delayed ACK.
+    # Bench 2026-11-25: about 24 ms per command, ~0.39 s of a 1.17 s C1+C2 read. The
+    # LeCroy transport sets it for the same reason. False restores the v0.4.x socket.
+    tcp_nodelay = True
 
     # -- construction / lifetime -------------------------------------------- #
 
@@ -145,6 +161,12 @@ class RigolDHO800:
         # The connect may have used a deadline-shortened timeout; sends keep the full ceiling.
         self.tn.timeout = timeout
         self.tn.sock.settimeout(timeout)
+        if self.tcp_nodelay:
+            try:
+                self.tn.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError as exc:
+                self.close()
+                raise ScopeConnectionError(f"cannot set TCP_NODELAY on {ip}:{port}: {exc}") from exc
 
         # Resynchronise: a reply cut off on an earlier connection arrives on this one.
         try:
@@ -440,27 +462,94 @@ class RigolDHO800:
 
     # Bytes per sample for each supported :WAVeform:FORMat (Programming Guide §3.28.3).
     _BYTES_PER_POINT = {'BYTE': 1, 'WORD': 2}
+    # <format> field of :WAVeform:PREamble?: 0=BYTE, 1=WORD, 2=ASCii.
+    _PREAMBLE_FORMAT = {'BYTE': 0, 'WORD': 1}
 
-    def read_channel(self, channel, fmt='WORD', verify_window=False):
-        """Read one displayed analog channel in MAXimum mode. Returns a ``Waveform``.
+    # True: one :WAVeform:PREamble? per channel. False: the six individual
+    # :WAVeform:X*?/Y*? queries (pre-0.5 behaviour). Both give the same six floats.
+    calibration_from_preamble = True
 
-        Sequence (Programming Guide §3.28): set source / MAXimum mode / format,
-        ask the scope for its memory depth, query the calibration parameters, then
-        read the whole record via batched ``:WAVeform:DATA?`` (``_read_full_waveform``
-        -- the firmware caps a single transfer, so this loops ``:WAVeform:STARt`` /
-        ``:WAVeform:STOP`` windows until done), then convert.
+    def _check_format(self, fmt):
+        fmt_up = str(fmt).strip().upper()
+        if fmt_up not in self._BYTES_PER_POINT:
+            raise RigolScopeError(
+                f"unsupported waveform format {fmt!r}; use 'WORD' (2 bytes/point) or 'BYTE'"
+            )
+        return fmt_up
 
-        ``fmt`` defaults to ``'WORD'`` (2 bytes/point), which carries the scope's
-        full 12-bit ADC code. ``'BYTE'`` (8-bit, top 8 of 12 bits) is also accepted
-        but discards 4 bits of vertical resolution -- WORD is the right choice for
-        data acquisition. WORD codes are little-endian uint16 (§3.28.3).
+    def _select_waveform(self, ch, fmt_up):
+        """Point the :WAVeform: subsystem at ``ch`` in MAXimum mode and ``fmt_up`` format.
 
-        Calibration (XINCrement/XORigin/XREFerence, YINCrement/YORigin/YREFerence)
-        is read with the individual ``:WAVeform:`` parameter queries the guide
-        lists as the "Related Commands" for ``:WAVeform:DATA?`` (p.404) -- not the
-        lumped ``:WAVeform:PREamble?`` -- and *after* the format is set, so the
-        scope reports the scaling for the format in effect. Conversion uses the
-        literal guide formula ``voltage = (raw - YORigin - YREFerence) * YINCrement``.
+        No settle delay: SCPI runs commands in order, so the next query already sees the
+        new source, mode and format. MAXimum mode in the Stop state returns the full
+        captured memory record (§3.28.2).
+        """
+        self._write(f':WAVeform:SOURce {ch}')
+        self._write(':WAVeform:MODE MAXimum')
+        self._write(f':WAVeform:FORMat {fmt_up}')
+
+    def _calibration_from_queries(self):
+        """The six calibration values from the individual :WAVeform:X*?/Y*? queries
+        (the "Related Commands" for :WAVeform:DATA?, p.404)."""
+        return {
+            'x_increment': self._query_float(':WAVeform:XINCrement?'),
+            'x_origin': self._query_float(':WAVeform:XORigin?'),
+            'x_reference': self._query_float(':WAVeform:XREFerence?', default=0.0),
+            'y_increment': self._query_float(':WAVeform:YINCrement?'),
+            'y_origin': self._query_float(':WAVeform:YORigin?'),
+            'y_reference': self._query_float(':WAVeform:YREFerence?'),
+        }
+
+    def _calibration_from_preamble(self, fmt_up):
+        """The six calibration values from one ``:WAVeform:PREamble?``.
+
+        Reply: ``format,type,points,count,xinc,xorig,xref,yinc,yorig,yref``. Only the
+        last six are used; ``<format>`` must match ``fmt_up`` (a mismatch would mean the
+        FORMat command was not applied). ``<points>`` is ignored: it is not the record
+        length (see the module docstring).
+        """
+        reply = self._query(':WAVeform:PREamble?')
+        fields = reply.split(',')
+        try:
+            values = [float(f) for f in fields]
+        except ValueError:
+            values = None
+        if values is None or len(values) != 10:
+            raise RigolScopeError(f"malformed reply to :WAVeform:PREamble?: {reply!r}")
+        if values[0] != self._PREAMBLE_FORMAT[fmt_up]:
+            raise RigolScopeError(
+                f":WAVeform:PREamble? reports format {fields[0].strip()}, "
+                f"expected {self._PREAMBLE_FORMAT[fmt_up]} ({fmt_up})"
+            )
+        keys = ('x_increment', 'x_origin', 'x_reference', 'y_increment', 'y_origin', 'y_reference')
+        return dict(zip(keys, values[4:]))
+
+    def _read_calibration(self, fmt_up):
+        if self.calibration_from_preamble:
+            return self._calibration_from_preamble(fmt_up)
+        return self._calibration_from_queries()
+
+    def read_channels(self, channels, fmt='WORD', verify_window=False):
+        """Read several displayed analog channels of one stopped acquisition.
+
+        Returns ``{channel: Waveform}`` keyed by the ``channels`` items exactly as passed
+        (``read_channels(['C1', 'C2'])['C1']``), in that order. Each ``Waveform`` is what
+        ``read_channel`` returns for that channel.
+
+        Once per call: one stopped check (``wait_until_stopped``), ``:ACQuire:MDEPth?``,
+        ``:TIMebase:MAIN:SCALe?`` and ``:TIMebase:MAIN:OFFSet?``. Then per channel:
+        source / MAXimum mode / format, the calibration (``:WAVeform:PREamble?``), the
+        batched ``:WAVeform:DATA?`` read (``_read_full_waveform`` -- the firmware caps a
+        single transfer, so this loops ``:WAVeform:STARt`` / ``:WAVeform:STOP``
+        windows until done), ``:CHANnel<n>:SCALe?`` and ``:CHANnel<n>:OFFSet?``.
+
+        ``fmt`` defaults to ``'WORD'``: 2 bytes/point, little-endian uint16 (§3.28.3).
+        On the DHO804 (fw 00.01.05) WORD codes are not 0..4095: they sit around
+        ``:WAVeform:YREFerence?`` (32768), spanning roughly 15,600..50,500 with about
+        750 unevenly spaced levels per channel. ``'BYTE'`` (1 byte/point) is also
+        accepted but keeps about 4 fewer bits -- WORD is the right choice for data
+        acquisition. Conversion uses the literal guide formula
+        ``voltage = (raw - YORigin - YREFerence) * YINCrement``.
 
         ``verify_window=True`` reads each batch's ``:WAVeform:STARt?/:STOP?`` back and
         raises on a mismatch (a diagnostic guard against firmware window clamping;
@@ -471,43 +560,46 @@ class RigolDHO800:
         (Programming Guide §3.28.2). Raises ``RigolScopeError`` on any
         state/protocol problem.
         """
-        ch = self.channel_name(channel)
-        fmt_up = str(fmt).strip().upper()
-        if fmt_up not in self._BYTES_PER_POINT:
-            raise RigolScopeError(
-                f"unsupported waveform format {fmt!r}; use 'WORD' (12-bit) or 'BYTE'"
-            )
-        bytes_per_point = self._BYTES_PER_POINT[fmt_up]
+        fmt_up = self._check_format(fmt)
+        targets = {}
+        for key in channels:
+            ch = self.channel_name(key)
+            if key in targets or ch in targets.values():
+                raise ValueError(f"channel {key!r} requested twice")
+            targets[key] = ch
+        if not targets:
+            raise ValueError("no channels to read")
 
         self.wait_until_stopped()
 
+        # MDEPth is the captured-sample count (§3.3.2); MAX/Stop STARt..STOP range
+        # is 1..memory_depth (§3.28.13). Same for every channel of the acquisition.
+        n_mdepth = self.memory_depth()
+        if n_mdepth <= 0:
+            raise RigolScopeError(f"scope reported memory depth {n_mdepth}; nothing to read")
+        tb_scale = self.timebase_scale()
+        tb_offset = self.timebase_offset()
+
+        return {key: self._read_one_channel(ch, fmt_up, n_mdepth, tb_scale, tb_offset, verify_window)
+                for key, ch in targets.items()}
+
+    def read_channel(self, channel, fmt='WORD', verify_window=False):
+        """Read one displayed analog channel in MAXimum mode. Returns a ``Waveform``.
+
+        ``read_channels([channel], ...)`` for a single channel; see there.
+        """
+        return self.read_channels([channel], fmt=fmt, verify_window=verify_window)[channel]
+
+    def _read_one_channel(self, ch, fmt_up, n_mdepth, tb_scale, tb_offset, verify_window):
+        bytes_per_point = self._BYTES_PER_POINT[fmt_up]
         t0 = time.time()
         if self.verbose:
             print(f"<:> reading {ch} ({fmt_up}) from internal memory (MAXimum/Stop)")
 
-        # State, per Programming Guide §3.28. MAXimum mode in the Stop state
-        # returns the full captured memory record (§3.28.2).
-        self._write(f':WAVeform:SOURce {ch}')
-        self._write(':WAVeform:MODE MAXimum')
-        self._write(f':WAVeform:FORMat {fmt_up}')
-
-        # MDEPth is the captured-sample count (§3.3.2); MAX/Stop STARt..STOP range
-        # is 1..memory_depth (§3.28.13).
-        n_mdepth = self.memory_depth()
-        if n_mdepth <= 0:
-            raise RigolScopeError(f"scope reported memory depth {n_mdepth}; nothing to read")
-
-        # Calibration straight from the scope -- the per-parameter :WAVeform:
-        # queries the guide names as "Related Commands" for :WAVeform:DATA? (p.404),
-        # NOT the lumped :WAVeform:PREamble?. In MAX/Stop mode YINCrement and
-        # YORigin have no closed form (§3.28.9/.10), so the scope is authoritative.
-        # These describe the whole record -- queried once, before the batched read.
-        x_increment = self._query_float(':WAVeform:XINCrement?')
-        x_origin = self._query_float(':WAVeform:XORigin?')
-        x_reference = self._query_float(':WAVeform:XREFerence?', default=0.0)
-        y_increment = self._query_float(':WAVeform:YINCrement?')
-        y_origin = self._query_float(':WAVeform:YORigin?')
-        y_reference = self._query_float(':WAVeform:YREFerence?')
+        self._select_waveform(ch, fmt_up)
+        # Describes the whole record -- read once, before the batched read, and after
+        # the format is set so the scope reports the scaling for the format in effect.
+        cal = self._read_calibration(fmt_up)
 
         # Fetch the full record in batches (§3.28.5). DATA? returns bytes;
         # bytes_per_point converts to the point count.
@@ -520,34 +612,32 @@ class RigolDHO800:
                 f"incomplete waveform for {ch}: got {n} of {n_mdepth} memory points"
             )
 
-        # BYTE -> uint8, WORD -> little-endian uint16 (12-bit code in a 16-bit word).
+        # BYTE -> uint8, WORD -> little-endian uint16.
         dtype = np.dtype('<u2') if fmt_up == 'WORD' else np.dtype(np.uint8)
         raw = np.frombuffer(payload[:n * bytes_per_point], dtype=dtype)
 
         # Conversion -- literal guide formula (p.404):
         #   voltage = (raw - YORigin - YREFerence) * YINCrement
         #   time    = XORigin + (i - XREFerence) * XINCrement   (XREFerence == 0)
-        voltage = (raw.astype(np.float64) - y_origin - y_reference) * y_increment
+        voltage = (raw.astype(np.float64) - cal['y_origin'] - cal['y_reference']) * cal['y_increment']
         idx = np.arange(n, dtype=np.float64)
-        t_arr = x_origin + (idx - x_reference) * x_increment
+        t_arr = cal['x_origin'] + (idx - cal['x_reference']) * cal['x_increment']
 
         # Extra context for the HDF5 attrs / sanity checks (not used for conversion).
         v_scale = self.vertical_scale(ch)
         v_offset = self.vertical_offset(ch)
-        tb_scale = self.timebase_scale()
-        tb_offset = self.timebase_offset()
 
         metadata = {
             'format': 0 if fmt_up == 'BYTE' else 1,   # 0=BYTE, 1=WORD (§3.28.3)
             'type': 1,     # MAXimum (§3.28.14)
             'points': n,
             'count': 1,
-            'x_increment': x_increment,
-            'x_origin': x_origin,
-            'x_reference': x_reference,
-            'y_increment': y_increment,
-            'y_origin': y_origin,
-            'y_reference': y_reference,
+            'x_increment': cal['x_increment'],
+            'x_origin': cal['x_origin'],
+            'x_reference': cal['x_reference'],
+            'y_increment': cal['y_increment'],
+            'y_origin': cal['y_origin'],
+            'y_reference': cal['y_reference'],
             'vertical_scale': v_scale,
             'vertical_offset': v_offset,
             'timebase_scale': tb_scale,
@@ -555,7 +645,7 @@ class RigolDHO800:
         }
         if self.verbose:
             self._sanity_warnings(ch, metadata, voltage)
-            print(f"   {n} samples, dt={x_increment:.4g}s, "
+            print(f"   {n} samples, dt={cal['x_increment']:.4g}s, "
                   f"V[{voltage.min():.4g}, {voltage.max():.4g}] "
                   f"({time.time() - t0:.2f}s)")
 
@@ -566,17 +656,14 @@ class RigolDHO800:
         # (a) scope-reported YINCrement vs VerticalScale/25 -- exact in NORM/RUN
         # (§3.28.9), only "related" in MAX/Stop, so this is informational: a wild
         # ratio usually means a stale/wrong V/div read or a mode mix-up.
-        try:
-            v_div = self.vertical_scale(ch)
-            expected = v_div / BYTE_CODES_PER_DIV
-            if expected > 0 and metadata['y_increment'] > 0:
-                ratio = metadata['y_increment'] / expected
-                if ratio < 0.5 or ratio > 2.0:
-                    print(f"   NOTE: {ch} reported YINCrement={metadata['y_increment']:.4g}V "
-                          f"is {ratio:.2g}x VerticalScale/25 ({expected:.4g}V from "
-                          f"{v_div:g}V/div) -- expected in MAX/Stop, but worth a glance")
-        except RigolScopeError:
-            pass  # non-numeric V/div: skip the hint; transport errors propagate
+        v_div = metadata['vertical_scale']  # already read; no second query
+        expected = v_div / BYTE_CODES_PER_DIV
+        if expected > 0 and metadata['y_increment'] > 0:
+            ratio = metadata['y_increment'] / expected
+            if ratio < 0.5 or ratio > 2.0:
+                print(f"   NOTE: {ch} reported YINCrement={metadata['y_increment']:.4g}V "
+                      f"is {ratio:.2g}x VerticalScale/25 ({expected:.4g}V from "
+                      f"{v_div:g}V/div) -- expected in MAX/Stop, but worth a glance")
         # (b) a long constant tail -> the acquisition probably didn't capture a full record.
         if voltage.size >= 64:
             tail = voltage[-max(64, voltage.size // 50):]

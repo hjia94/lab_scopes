@@ -65,8 +65,8 @@ from lab_scopes.rigol import RigolDHO800
 scope = RigolDHO800("192.168.1.50")
 scope.single()                       # arm a single capture
 scope.wait_until_stopped()           # block until acquisition completes
-for ch in scope.displayed_channels():
-    wf = scope.read_channel(ch)      # Waveform: raw samples + calibration
+waves = scope.read_channels(scope.displayed_channels())  # {ch: Waveform}
+for ch, wf in waves.items():         # Waveform: raw samples + calibration
     print(ch, wf.points)             # voltage samples vs time
 scope.screen_png("capture.png")      # save a screenshot
 scope.close()
@@ -75,7 +75,14 @@ scope.close()
 Key methods: `run` / `stop` / `single`, `set_sweep`, `trigger_status`,
 `wait_until_stopped`, `displayed_channels`, `memory_depth`, `sample_rate`,
 `vertical_scale` / `vertical_offset`, `timebase_scale` / `timebase_offset`,
-`read_channel`, and `screen_png`.
+`read_channels` / `read_channel`, and `screen_png`.
+
+`read_channels(channels)` reads several channels of one stopped acquisition and
+does the once-per-shot queries (stop check, memory depth, timebase) once.
+`read_channel(ch)` is the same for one channel. WORD (the default) returns
+little-endian uint16 values; on the DHO804 they sit around `YREFerence` 32768
+(about 15,600..50,500), not 0..4095, and `Waveform.voltage` applies the scope's
+calibration.
 
 **Time limits and errors.** Every wait has its own ceiling (15 s per text query,
 a byte-scaled ceiling per waveform chunk). Pass a `Deadline` to cap a whole
@@ -114,6 +121,14 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
 - **Rigol time limits without signals.** An optional `Deadline` bounds a whole
   Rigol operation (connect, queries, waveform reads, settle delays), on
   Windows and Linux. Commands sent and replies decoded are unchanged.
+- **Faster Rigol multi-channel reads.** `read_channels(['C1', 'C2'])` reads
+  several channels of one shot with the shared queries sent once, calibration
+  from one `:WAVeform:PREamble?` per channel, and no 50 ms settle delays after
+  `:WAVeform:SOURce/MODE/FORMat`. The socket uses `TCP_NODELAY`, so a command
+  that follows another is not held for the scope's delayed ACK
+  (`RigolDHO800.tcp_nodelay = False` turns it off). Returned data and metadata
+  are unchanged. Bench (DHO804, C1+C2, 1M points WORD, before `TCP_NODELAY`):
+  1.80 s per shot down to 1.31 s.
 - **Rigol error handling.** Timeouts, lost connections and malformed replies
   raise distinct `ScopeError` types instead of being retried silently or
   returned as partial data. A timed-out query no longer returns its default
@@ -141,9 +156,9 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
 - **Sequence / segment acquisition is back.** LeCroy multi-segment captures
   are supported via `acquire_sequence_data()` and per-segment trigger
   timestamps via `get_sequence_trigger_times()`.
-- **Rigol 12-bit full-memory acquisition.** DHO800/DHO900 reads the complete
-  deep-memory record with the correct 12-bit calibration, not just the screen
-  window.
+- **Rigol full-memory WORD acquisition.** DHO800/DHO900 reads the complete
+  deep-memory record in WORD format with the scope's calibration, not just the
+  screen window.
 - **Master/slave synchronized acquisition** for triggering multiple LeCroy
   scopes on the same shot (`arm_master_single`, `wait_for_stop_then_complete`).
 - **8-channel LeCroy support** — C1–C8 are all captured (earlier releases
