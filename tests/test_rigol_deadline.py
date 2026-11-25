@@ -27,11 +27,13 @@ class FakeRigol:
     """One-connection loopback scope.
 
     ``script`` maps a received command line to bytes (sent as is) or to a callable(conn)
-    run in the server thread; a line with no entry, or None, gets no reply.
+    run in the server thread; a line with no entry, or None, gets no reply. ``greeting``
+    is sent as soon as the connection is accepted (stale data from an earlier connection).
     """
 
-    def __init__(self, script=None):
+    def __init__(self, script=None, greeting=b""):
         self.script = {"*IDN?": IDN, **(script or {})}
+        self.greeting = greeting
         self.received = []  # (monotonic arrival time, line)
         self.closed = threading.Event()  # set once the client connection has ended
         self._server = socket.create_server(("127.0.0.1", 0))
@@ -51,6 +53,8 @@ class FakeRigol:
             return
         try:
             with conn:
+                if self.greeting:
+                    conn.sendall(self.greeting)
                 self._handle(conn)
         finally:
             self.closed.set()
@@ -104,8 +108,8 @@ def trickle(header, n_bytes, interval):
 def fake():
     servers = []
 
-    def make(script=None):
-        server = FakeRigol(script)
+    def make(script=None, greeting=b""):
+        server = FakeRigol(script, greeting)
         servers.append(server)
         return server
 
@@ -449,3 +453,55 @@ def test_query_default_applies_to_unparseable_reply_only(fake):
     scope.deadline = Deadline(0.5)
     with pytest.raises(ScopeTimeoutError):  # v0.4.0 returned the default 0.0 here
         scope.timebase_scale()
+
+
+# -- resync: a reply cut off on an earlier connection arrives on the next one -------- #
+
+# Leftover waveform bytes as the DHO804 sends them: binary, with '\n' and '#' inside.
+STALE_BLOCK = (b"\n#\x00\xff" + bytes(range(256))) * 550  # about 140 KB
+NEXT_SCRIPT = {":TRIGger:STATus?": b"STOP\n", ":ACQuire:MDEPth?": b"1.0000E+06\n"}
+
+
+def assert_in_step(scope, server):
+    assert scope.idn == IDN.decode().strip()
+    assert scope.model == "DHO804"
+    assert scope.trigger_status() == "STOP"
+    assert scope.memory_depth() == 1_000_000
+    assert server.lines() == ["*IDN?", ":TRIGger:STATus?", ":ACQuire:MDEPth?"]
+
+
+def test_stale_block_pending_at_connect_is_discarded(fake):
+    server = fake(NEXT_SCRIPT, greeting=STALE_BLOCK)
+    with connect(server) as scope:
+        assert scope.stale_bytes_discarded == len(STALE_BLOCK)
+        assert_in_step(scope, server)
+
+
+@pytest.mark.parametrize("stale", [
+    b"-5.000000E-09\n",                    # a small reply: would put every reply one behind
+    STALE_BLOCK,                            # waveform bytes sent after the first command
+    IDN + b"1.000000E-09\n",                # a cut-off *IDN? and the reply after it
+    IDN,                                    # a cut-off *IDN? alone: take the last IDN line
+], ids=["small-reply", "block", "idn-then-reply", "idn"])
+def test_stale_reply_before_idn_is_skipped(fake, stale):
+    server = fake({**NEXT_SCRIPT, "*IDN?": stale + IDN})
+    with connect(server, Deadline(5.0)) as scope:
+        assert scope.stale_bytes_discarded == len(stale)
+        assert_in_step(scope, server)
+
+
+def test_no_idn_line_raises_protocol_error_and_closes():
+    from lab_scopes.errors import ScopeProtocolError
+    from lab_scopes.transports.rigol_functions import resync
+    from lab_scopes.transports.telnetlib_receive_all import Telnet
+
+    server = FakeRigol({"*IDN?": b"1.000000E-09\n" + STALE_BLOCK[:1000]})
+    try:
+        tn = Telnet("127.0.0.1", server.port, timeout=2.0)
+        try:
+            with pytest.raises(ScopeProtocolError, match="RIGOL TECHNOLOGIES"):
+                resync(tn, timeout=0.3)
+        finally:
+            tn.close()
+    finally:
+        server.close()
