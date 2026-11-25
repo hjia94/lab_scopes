@@ -257,18 +257,30 @@ def test_preamble_matches_separate_queries(scope, capsys):
     say the preamble read wrong values in MAX mode, so this must hold on the bench firmware.
     If it fails, set RigolDHO800.calibration_from_preamble = False and report it.
     Channels are visited forward then backward, and each preamble is read right after
-    :WAVeform:SOURce/MODE/FORMat with no settle delay, so a source switch that had not
-    taken effect would show as the previous channel's values.
+    :WAVeform:SOURce/MODE/FORMat with no settle delay. Both reads would be stale together
+    if a source switch had not taken effect, so they are also compared with the six
+    queries read again 0.2 s later. That only shows a late switch when the channels'
+    calibrations differ (different V/div); otherwise the test prints INCONCLUSIVE.
     """
     _armed_stop(scope)
     chans = _displayed(scope)
     for fmt in ("WORD", "BYTE"):
+        settled = {}
         for ch in list(chans) + list(reversed(chans)):
             scope._select_waveform(ch, fmt)
-            pre = scope._calibration_from_preamble(fmt)
+            pre = scope._calibration_from_preamble(fmt)  # first query after the switch
             sep = scope._calibration_from_queries()
-            print(f"\n{ch} {fmt}: preamble {pre}\n{ch} {fmt}: queries  {sep}")
+            time.sleep(0.2)
+            late = scope._calibration_from_queries()
+            settled[ch] = late
+            print(f"\n{ch} {fmt}: preamble {pre}\n{ch} {fmt}: queries  {sep}"
+                  f"\n{ch} {fmt}: +0.2 s   {late}")
             assert pre == sep, f"{ch} {fmt}: PREamble {pre} != separate queries {sep}"
+            assert pre == late, f"{ch} {fmt}: read right after the switch {pre} != 0.2 s later {late}"
+        distinct = {tuple(sorted(c.items())) for c in settled.values()}
+        if len(chans) > 1 and len(distinct) < len(chans):
+            print(f"\nSETTLE INCONCLUSIVE ({fmt}): some displayed channels report identical "
+                  f"calibration; set different V/div on them to test a late source switch")
 
 
 @_real
