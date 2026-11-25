@@ -35,9 +35,10 @@ _EXPANDED_NAME = {
 class RigolScope(RigolDHO800):
     """Legacy facade. New code should prefer ``RigolDHO800`` directly."""
 
-    def __init__(self, ipv4_addr, verbose=True, timeout=5000):
+    def __init__(self, ipv4_addr, verbose=True, timeout=5000, deadline=None):
         # Legacy ``timeout`` was in milliseconds; RigolDHO800 wants seconds.
-        super().__init__(ipv4_addr, port=5555, timeout=timeout / 1000.0, verbose=verbose)
+        super().__init__(ipv4_addr, port=5555, timeout=timeout / 1000.0, verbose=verbose,
+                         deadline=deadline)
         self.ip_address = ipv4_addr
         self.idn_string = self.idn
         # Per-trace derived metadata from the most recent acquire() (keyed 'C1'..).
@@ -88,10 +89,9 @@ class RigolScope(RigolDHO800):
         'SINGLE' arms one acquisition (``:SINGle``); 'STOP' stops (``:STOP``);
         'NORM'/'AUTO' set the trigger sweep mode.
         """
-        try:
-            prev = self.trigger_status()
-        except Exception:
-            prev = ''
+        # No fallback on failure: the connection is then closed, so the command below
+        # could not be sent either, and the real error would be masked.
+        prev = self.trigger_status()
         m = str(trigger_mode).strip().upper()
         if m == 'STOP':
             self.stop()

@@ -40,11 +40,12 @@ is the literal guide formula:
     time[i]    = x_origin + (i - x_reference) * x_increment        # §3.28.6/.7/.8
 
 Public surface:
-    RigolDHO800(ip, port=5555, timeout=5.0, verbose=True)   # context manager
+    RigolDHO800(ip, port=5555, timeout=5.0, verbose=True, deadline=None)   # context manager
+        deadline                         Deadline capping every wait; replaceable between operations
         idn / model
         run() / stop() / single() / set_sweep(mode)
         trigger_status()                 -> 'TD'|'WAIT'|'RUN'|'AUTO'|'STOP'
-        wait_until_stopped(timeout)      -> raises TimeoutError on timeout
+        wait_until_stopped(timeout)      -> raises ScopeTimeoutError on timeout
         displayed_channels()             -> ('CHANnel1', ...)   (analog only)
         memory_depth()                   -> int    (:ACQuire:MDEPth?)
         sample_rate()                    -> float  (:ACQuire:SRATe?)
@@ -54,18 +55,31 @@ Public surface:
         screen_png(path)                 -> path   (:DISPlay:DATA? PNG dump)
 
     Waveform        dataclass: channel, raw, voltage, time, metadata
+
+Errors: transport failures raise lab_scopes.errors ScopeTimeoutError /
+ScopeConnectionError / ScopeProtocolError; device-state problems raise RigolScopeError.
+All are ScopeError (a RuntimeError). After a transport failure the connection is closed
+and every later call raises ScopeConnectionError: port 5555 has no device clear, so a
+late reply would otherwise answer the next query. Reconnect with a new instance.
+
+Closing does not discard that late reply either: the DHO804 sends it on the NEXT
+connection (bench, fw 00.01.05). So the constructor resynchronises
+(``rigol_functions.resync``): it discards pending bytes, sends ``*IDN?`` and skips
+everything until the ``RIGOL TECHNOLOGIES,`` line. ``stale_bytes_discarded`` says how
+many bytes were skipped.
 """
 
-import socket
 import time
 from dataclasses import dataclass
 
 import numpy as np
 
+from lab_scopes.errors import ScopeConnectionError, ScopeError, ScopeTimeoutError
+from lab_scopes.transports.deadline import clamp, sleep
 from lab_scopes.transports.rigol_functions import (
     command,
     expected_data_bytes,
-    get_memory_depth,
+    resync,
     tmc_header_bytes,
 )
 from lab_scopes.transports.telnetlib_receive_all import Telnet
@@ -95,7 +109,7 @@ class Waveform:
         return len(self.voltage)
 
 
-class RigolScopeError(RuntimeError):
+class RigolScopeError(ScopeError):
     """Raised for protocol / state errors talking to the scope."""
 
 
@@ -105,29 +119,41 @@ class RigolDHO800:
     _ANALOG_CHANNELS = ('CHANnel1', 'CHANnel2', 'CHANnel3', 'CHANnel4')
     _MATH_CHANNELS = ('MATH1', 'MATH2', 'MATH3', 'MATH4')
 
+    # Class-level so instances built without __init__ (test fakes) have no deadline.
+    deadline = None
+
     # -- construction / lifetime -------------------------------------------- #
 
-    def __init__(self, ip, port=5555, timeout=5.0, verbose=True):
+    def __init__(self, ip, port=5555, timeout=5.0, verbose=True, deadline=None):
         self.ip = ip
         self.port = port
-        self.timeout = timeout
+        self.timeout = timeout  # connect and send ceiling
         self.verbose = verbose
+        self.deadline = deadline
 
         self.tn = None
         self.idn = ''
+        self.stale_bytes_discarded = 0
         self.manufacturer = self.model = self.serial = self.firmware = ''
 
         if self.verbose:
             print(f"<:> connecting to Rigol scope at {ip}:{port}")
         try:
-            self.tn = Telnet(ip, port, timeout=timeout)
-        except (OSError, socket.timeout) as exc:
-            raise RigolScopeError(f"cannot connect to scope at {ip}:{port}: {exc}") from exc
+            self.tn = Telnet(ip, port, timeout=clamp(deadline, timeout))
+        except OSError as exc:
+            raise ScopeConnectionError(f"cannot connect to scope at {ip}:{port}: {exc}") from exc
+        # The connect may have used a deadline-shortened timeout; sends keep the full ceiling.
+        self.tn.timeout = timeout
+        self.tn.sock.settimeout(timeout)
 
-        self.idn = self._query('*IDN?')
-        if not self.idn or self.idn == 'command error':
+        # Resynchronise: a reply cut off on an earlier connection arrives on this one.
+        try:
+            self.idn, self.stale_bytes_discarded = resync(self.tn, timeout=15, deadline=deadline)
+        except BaseException:
             self.close()
-            raise RigolScopeError(f"scope at {ip} did not respond to *IDN?")
+            raise
+        if self.verbose and self.stale_bytes_discarded:
+            print(f"<:> discarded {self.stale_bytes_discarded} stale bytes from an earlier connection")
         parts = [p.strip() for p in self.idn.split(',')]
         if len(parts) >= 4:
             self.manufacturer, self.model, self.serial, self.firmware = parts[:4]
@@ -165,30 +191,36 @@ class RigolDHO800:
 
     # -- low-level SCPI helpers --------------------------------------------- #
 
+    def _io(self, *args, **kwargs):
+        """``command(self.tn, ...)`` under ``self.deadline``; any failure closes the connection."""
+        if self.tn is None:
+            raise ScopeConnectionError(f"connection to {self.ip} is closed (closed, or an earlier I/O failure)")
+        try:
+            return command(self.tn, *args, deadline=self.deadline, **kwargs)
+        except BaseException:
+            self.close()
+            raise
+
     def _query(self, scpi, timeout=15):
         """Send a query and return the stripped text reply."""
-        return command(self.tn, scpi, timeout=timeout)
+        return self._io(scpi, timeout=timeout)
 
     def _query_float(self, scpi, default=None):
+        """``default`` covers an unparseable reply only; transport errors propagate."""
+        reply = self._query(scpi)
         try:
-            return float(self._query(scpi).strip())
-        except (ValueError, TypeError, AttributeError, RuntimeError):
+            return float(reply)
+        except ValueError:
             if default is None:
-                raise RigolScopeError(f"non-numeric reply to {scpi}")
+                raise RigolScopeError(f"non-numeric reply to {scpi}: {reply!r}")
             return default
 
     def _query_int(self, scpi, default=None):
-        try:
-            return int(float(self._query(scpi).strip()))
-        except (ValueError, TypeError, AttributeError, RuntimeError):
-            if default is None:
-                raise RigolScopeError(f"non-numeric reply to {scpi}")
-            return default
+        return int(self._query_float(scpi, default))
 
     def _write(self, scpi):
         """Send a command (no reply expected)."""
-        if command(self.tn, scpi) == 'command error':
-            raise RigolScopeError(f"failed to send {scpi!r}")
+        self._io(scpi)
 
     def _read_block(self, scpi, timeout):
         """Send a query that returns an IEEE 488.2 definite-length block.
@@ -196,9 +228,7 @@ class RigolDHO800:
         Returns ``(data_bytes, declared_len)`` -- the payload (header & trailing
         terminator stripped) and the byte count the block header declared.
         """
-        resp = command(self.tn, scpi, timeout=timeout, binary_data=True)
-        if not resp or not resp.startswith(b'#'):
-            raise RigolScopeError(f"no/invalid TMC block in reply to {scpi!r}")
+        resp = self._io(scpi, timeout=timeout, binary_data=True)
         hdr_len = tmc_header_bytes(resp)
         declared = expected_data_bytes(resp)
         if declared <= 0:
@@ -258,33 +288,25 @@ class RigolDHO800:
         return self._query(':TRIGger:STATus?').strip().upper()
 
     def wait_until_stopped(self, timeout=30.0, poll_interval=0.05):
-        """Block until ``:TRIGger:STATus?`` reports STOP, or raise ``TimeoutError``."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        """Block until ``:TRIGger:STATus?`` reports STOP, or raise ``ScopeTimeoutError``."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.trigger_status() == 'STOP':
                 return
-            time.sleep(poll_interval)
-        raise TimeoutError(f"scope did not reach STOP within {timeout}s")
+            sleep(self.deadline, poll_interval)
+        raise ScopeTimeoutError(f"scope did not reach STOP within {timeout}s")
 
     # -- configuration queries ---------------------------------------------- #
 
     def displayed_channels(self):
         """Return the analog channels currently shown on screen, e.g. ('CHANnel1', 'CHANnel3')."""
-        shown = []
-        for ch in self._ANALOG_CHANNELS:
-            try:
-                if self._query(f':{ch}:DISPlay?').strip() == '1':
-                    shown.append(ch)
-            except (OSError, RuntimeError, ValueError):
-                pass  # channel doesn't exist on this model
+        # Not try/except per channel: after a failure the connection is closed, and every
+        # later channel would silently read as "not displayed".
+        shown = [ch for ch in self._ANALOG_CHANNELS
+                 if self._query(f':{ch}:DISPlay?').strip() == '1']
         # This driver acquires analog channels only; note (don't error) if MATH is on.
-        math_on = []
-        for ch in self._MATH_CHANNELS:
-            try:
-                if self._query(f':{ch}:DISPlay?').strip() == '1':
-                    math_on.append(ch)
-            except (OSError, RuntimeError, ValueError):
-                pass
+        math_on = [ch for ch in self._MATH_CHANNELS
+                   if self._query(f':{ch}:DISPlay?').strip() == '1']
         if math_on:
             print(f"NOTE: MATH trace(s) {math_on} are displayed but are not acquired "
                   f"by this driver (analog channels only).")
@@ -294,12 +316,10 @@ class RigolDHO800:
         """Return ``:ACQuire:MDEPth?`` as int -- the captured-sample count per trigger.
 
         The query returns scientific notation (e.g. ``1.000E+6``), even in Auto
-        mode (Programming Guide §3.3.2). This is the authoritative record length.
+        mode (Programming Guide §3.3.2). This is the authoritative record length, so a
+        bad reply raises RigolScopeError rather than defaulting.
         """
-        try:
-            return get_memory_depth(self.tn)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise RigolScopeError(f"could not read :ACQuire:MDEPth?: {exc}") from exc
+        return self._query_int(':ACQuire:MDEPth?')
 
     def sample_rate(self):
         """Return ``:ACQuire:SRATe?`` (Sa/s). Raises if the scope gives a non-positive
@@ -405,7 +425,7 @@ class RigolDHO800:
                 if self.verbose:
                     print(f"   empty :WAVeform:DATA? at point {start}, "
                           f"retry {empty_tries}/{self._EMPTY_CHUNK_RETRIES}")
-                time.sleep(self._EMPTY_CHUNK_BACKOFF)
+                sleep(self.deadline, self._EMPTY_CHUNK_BACKOFF)
                 continue
             empty_tries = 0  # progress made; reset the retry budget
             chunks.append(payload[:points_got * bytes_per_point])
@@ -555,8 +575,8 @@ class RigolDHO800:
                     print(f"   NOTE: {ch} reported YINCrement={metadata['y_increment']:.4g}V "
                           f"is {ratio:.2g}x VerticalScale/25 ({expected:.4g}V from "
                           f"{v_div:g}V/div) -- expected in MAX/Stop, but worth a glance")
-        except (OSError, RuntimeError, ValueError):
-            pass
+        except RigolScopeError:
+            pass  # non-numeric V/div: skip the hint; transport errors propagate
         # (b) a long constant tail -> the acquisition probably didn't capture a full record.
         if voltage.size >= 64:
             tail = voltage[-max(64, voltage.size // 50):]
