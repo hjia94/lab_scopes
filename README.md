@@ -119,6 +119,19 @@ volts, time, gain, offset = read_trc_data_simplified("capture.trc")
   returned as partial data. A timed-out query no longer returns its default
   value, and a failed connection is closed rather than reused.
 
+## What's new in 0.4.2
+
+- **Faster LeCroy connect.** `LeCroyScope(..., n_channels=4)` skips channel-count
+  detection, which could cost a full socket timeout. The VICP socket now sets
+  `TCP_NODELAY`, which removes ~200 ms stalls on back-to-back writes.
+
+## What's new in 0.4.1
+
+- **Trigger timestamps fixed.** `wavedesc_trigger_timestamp()` now reads the
+  scope's WAVEDESC clock fields as LA local time (`SCOPE_TIMEZONE`, override
+  with `tz=`) instead of UTC, so it returns a true epoch. Earlier releases were
+  7 h (PDT) / 8 h (PST) early; differences between scopes were unaffected.
+
 ## What's new in 0.4.0
 
 - **Sequence / segment acquisition is back.** LeCroy multi-segment captures

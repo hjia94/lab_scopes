@@ -84,21 +84,29 @@ KNOWN_TRACE_NAMES = sorted(list(EXPANDED_TRACE_NAMES.keys()))
 
 #================================================================================================
 
-def wavedesc_trigger_timestamp(wd):
-	"""Return the WAVEDESC trigger time as POSIX-style seconds (float), or None.
+# Zone the scope real-time clocks are set to. WAVEDESC trigger-time fields are
+# wall-clock readings with no zone attached, so they are interpreted here.
+SCOPE_TIMEZONE = "America/Los_Angeles"
 
-	The WAVEDESC stores the trigger instant as explicit fields (tt_year ..
-	tt_second, where tt_second is a double carrying the fractional part). This
-	collapses them to a single comparable float so two scopes' trigger times can
-	be differenced. Returns None if the timestamp is unset/unparseable -- callers
-	use this only for an advisory cross-scope sanity check, never for correctness,
-	so it must never raise.
 
-	Note the absolute value depends on each scope's real-time clock, which may
-	not be synchronized between instruments; only the *difference* taken at the
-	same shot is meaningful, and even then only as a hint.
+def wavedesc_trigger_timestamp(wd, tz=SCOPE_TIMEZONE):
+	"""Return the WAVEDESC trigger time as POSIX seconds since the epoch (float), or None.
+
+	The WAVEDESC stores the trigger instant as explicit wall-clock fields (tt_year ..
+	tt_second, where tt_second is a double carrying the fractional part) with no
+	timezone. They are interpreted in `tz` (an IANA zone name, default
+	SCOPE_TIMEZONE, the zone the scope clocks are synchronized to), so the result
+	is a true epoch, directly comparable to time.time() on any host. Pass
+	tz="UTC" for a scope whose clock is set to UTC.
+
+	In the repeated hour when DST ends, the first (daylight) occurrence is used,
+	since the fields cannot tell the two apart.
+
+	Returns None if the timestamp is unset/unparseable -- this must never raise.
+	The absolute value is only as good as the scope's real-time clock.
 	"""
-	import calendar
+	import datetime
+	from zoneinfo import ZoneInfo
 
 	try:
 		# tt_year of 0 means the field is unpopulated.
@@ -107,12 +115,15 @@ def wavedesc_trigger_timestamp(wd):
 		sec = float(wd.tt_second)
 		whole = int(sec)
 		frac = sec - whole
-		t = calendar.timegm((int(wd.tt_year), int(wd.tt_months), int(wd.tt_days),
-		                     int(wd.tt_hours), int(wd.tt_minute), whole))
-		return float(t) + frac
+		dt = datetime.datetime(int(wd.tt_year), int(wd.tt_months), int(wd.tt_days),
+		                       int(wd.tt_hours), int(wd.tt_minute), whole,
+		                       tzinfo=ZoneInfo(tz))
+		return dt.timestamp() + frac
 	except Exception:
 		return None
 
+
+#================================================================================================
 
 class LeCroyWavedesc:
 	""" LeCroy X-Stream scope WAVEDESC interpretation """

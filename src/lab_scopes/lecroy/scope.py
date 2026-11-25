@@ -95,7 +95,16 @@ class LeCroyScope:
     channel_names = ("C1", "C2", "C3", "C4")
 
     def __init__(self, ipv4_addr: str, verbose: bool = True, timeout: float = 5.0,
-                 port: int = 1861, transport=None, discover_traces="channels"):
+                 port: int = 1861, transport=None, discover_traces="channels",
+                 n_channels=None):
+        """Pass ``n_channels`` when the scope is known: detection can cost a full socket timeout.
+
+        A wrong ``n_channels`` is not checked against the hardware: too high
+        stalls discovery on the missing channels and reports them rejected; too
+        low silently drops real channels.
+        """
+        if n_channels is not None and n_channels not in self._VALID_CHANNEL_COUNTS:
+            raise ValueError(f"n_channels must be one of {self._VALID_CHANNEL_COUNTS}, got {n_channels!r}")
         self.ipv4_addr = ipv4_addr
         self.verbose = verbose
         self.transport = transport or LeCroyVICPTransport(ipv4_addr, port=port, timeout=_seconds(timeout))
@@ -110,9 +119,9 @@ class LeCroyScope:
         self.scope.write("COMM_HEADER OFF")
         self.scope.write("COMM_FORMAT DEF9,WORD,BIN")
 
-        # Determine how many analog input channels this scope has (4 or 8) before
+        # Determine how many analog input channels this scope has before
         # probing any trace names, so we never probe channels that cannot exist.
-        self.n_channels = self._detect_channel_count()
+        self.n_channels = n_channels if n_channels is not None else self._detect_channel_count()
         self.channel_names = tuple(f"C{i}" for i in range(1, self.n_channels + 1))
 
         # Discover which trace names this scope actually accepts.
